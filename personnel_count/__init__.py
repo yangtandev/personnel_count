@@ -1,0 +1,2 @@
+"""Personnel stay-count application."""
+

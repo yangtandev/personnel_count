@@ -1,0 +1,17 @@
+# Local config and secrets
+config.json
+
+# Runtime output
+.cache/
+img_log/
+log/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/

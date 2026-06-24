@@ -1,0 +1,6 @@
+numpy==1.26.4
+opencv-python==4.10.0.84
+torch==2.2.2
+openvino==2024.3.0
+git+https://github.com/THU-MIG/yolov10.git
+PyQt5==5.15.11

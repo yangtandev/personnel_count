@@ -1,0 +1,70 @@
+from dataclasses import dataclass
+from pathlib import Path
+import threading
+
+import cv2
+from ultralytics import YOLOv10
+
+from personnel_count.config import project_path
+
+
+@dataclass(frozen=True)
+class Detection:
+    box: tuple
+    conf: float
+    cls: int
+
+    @property
+    def center_x(self):
+        x1, _, x2, _ = self.box
+        return (x1 + x2) / 2
+
+    @property
+    def area(self):
+        x1, y1, x2, y2 = self.box
+        return max(0, x2 - x1) * max(0, y2 - y1)
+
+
+class PersonDetector:
+    def __init__(self, config):
+        model_cfg = config["model"]
+        model_path = Path(model_cfg["path"])
+        if not model_path.is_absolute():
+            model_path = project_path(model_path)
+        self.model = YOLOv10(model_path, task="detect")
+        self.person_class_id = int(model_cfg.get("person_class_id", 1))
+        self.min_conf = float(model_cfg.get("min_conf", 0.35))
+        self.iou = float(model_cfg.get("iou", 0.45))
+        self.inference_width = int(model_cfg.get("inference_width", 960) or 0)
+        self.lock = threading.Lock()
+
+    def detect(self, frame):
+        input_frame, scale_x, scale_y = self._prepare_frame(frame)
+        with self.lock:
+            result = self.model(source=input_frame, conf=self.min_conf, iou=self.iou, verbose=False)[0]
+        detections = []
+        for det in result.boxes:
+            cls_id = int(det.cls)
+            if cls_id != self.person_class_id:
+                continue
+            conf = float(det.conf[0])
+            x1, y1, x2, y2 = det.xyxy[0].cpu().numpy().astype(int)
+            box = (
+                int(round(x1 * scale_x)),
+                int(round(y1 * scale_y)),
+                int(round(x2 * scale_x)),
+                int(round(y2 * scale_y)),
+            )
+            detections.append(Detection(box, conf, cls_id))
+        return detections
+
+    def _prepare_frame(self, frame):
+        if self.inference_width <= 0:
+            return frame, 1.0, 1.0
+        height, width = frame.shape[:2]
+        if width <= self.inference_width:
+            return frame, 1.0, 1.0
+        new_width = self.inference_width
+        new_height = max(1, int(round(height * (new_width / width))))
+        resized = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+        return resized, width / new_width, height / new_height
