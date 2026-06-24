@@ -4,17 +4,17 @@ import threading
 import time
 
 import cv2
-from personnel_count.qt_compat import configure_runtime_environment
+from ui.qt_compat import configure_runtime_environment
 
 configure_runtime_environment()
 from PyQt5 import QtCore, QtWidgets
 
-from init.camera import VideoCapture
-from personnel_count.config import load_config
-from personnel_count.counter import ZoneCounter
-from personnel_count.detector import PersonDetector
-from personnel_count.recorder import Recorder
-from personnel_count.ui import PersonnelCountWindow
+from camera.capture import VideoCapture
+from config.loader import load_config
+from counting.zones import ZoneCounter
+from detection.person import PersonDetector
+from storage.recorder import Recorder
+from ui.window import PersonnelCountWindow
 
 
 STATUS_TEXT = {

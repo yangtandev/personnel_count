@@ -1,8 +1,8 @@
 import argparse
 import sys
 
-from personnel_count.config import DEFAULT_CONFIG_PATH
-from personnel_count.qt_compat import configure_runtime_environment
+from config.loader import DEFAULT_CONFIG_PATH
+from ui.qt_compat import configure_runtime_environment
 
 
 def parse_args():
@@ -18,7 +18,7 @@ def parse_args():
 def main():
     args = parse_args()
     configure_runtime_environment()
-    from personnel_count.app import run
+    from app.main import run
 
     return run(args.config)
 

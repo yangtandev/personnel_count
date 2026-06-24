@@ -49,7 +49,7 @@ def counter_config():
 
 class CounterTest(unittest.TestCase):
     def run_path(self, camera, xs, count=0):
-        from personnel_count.counter import ZoneCounter
+        from counting.zones import ZoneCounter
 
         counter = ZoneCounter(camera, counter_config())
         event = None
@@ -88,7 +88,7 @@ class CounterTest(unittest.TestCase):
         self.assertEqual(event.status, "blocked_negative_count")
 
     def test_multi_person_pauses(self):
-        from personnel_count.counter import ZoneCounter
+        from counting.zones import ZoneCounter
 
         event, status, people = ZoneCounter("top", counter_config()).update(
             [DummyDetection(25), DummyDetection(75)], (100, 100, 3), 1.0, 0
@@ -101,7 +101,7 @@ class CounterTest(unittest.TestCase):
 class QtCompatTest(unittest.TestCase):
     def test_cv2_cannot_leave_qt_plugin_path_on_cv2_plugins(self):
         import cv2  # noqa: F401
-        from personnel_count.qt_compat import configure_runtime_environment
+        from ui.qt_compat import configure_runtime_environment
 
         configure_runtime_environment()
         self.assertIn("PyQt5", os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"])
@@ -110,7 +110,7 @@ class QtCompatTest(unittest.TestCase):
     def test_window_can_be_created_offscreen(self):
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
         from PyQt5 import QtWidgets
-        from personnel_count.ui import PersonnelCountWindow
+        from ui.window import PersonnelCountWindow
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         window = PersonnelCountWindow(camera_names={"top": "井上", "bottom": "井底"})
@@ -128,7 +128,7 @@ class QtCompatTest(unittest.TestCase):
     def test_window_fonts_scale_with_size(self):
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
         from PyQt5 import QtWidgets
-        from personnel_count.ui import PersonnelCountWindow
+        from ui.window import PersonnelCountWindow
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         window = PersonnelCountWindow()
@@ -143,7 +143,7 @@ class QtCompatTest(unittest.TestCase):
     def test_camera_text_is_drawn_inside_single_view(self):
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
         from PyQt5 import QtWidgets
-        from personnel_count.ui import PersonnelCountWindow
+        from ui.window import PersonnelCountWindow
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         window = PersonnelCountWindow(camera_names={"top": "井上", "bottom": "井底"})
@@ -160,7 +160,7 @@ class QtCompatTest(unittest.TestCase):
     def test_text_is_centered_in_visible_black_bars(self):
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
         from PyQt5 import QtWidgets
-        from personnel_count.ui import PersonnelCountWindow
+        from ui.window import PersonnelCountWindow
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         window = PersonnelCountWindow(camera_names={"top": "井上", "bottom": "井底"})
@@ -196,7 +196,7 @@ class QtCompatTest(unittest.TestCase):
     def test_centered_text_baseline_stays_inside_bar(self):
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
         from PyQt5 import QtGui, QtWidgets
-        from personnel_count.ui import PersonnelCountWindow
+        from ui.window import PersonnelCountWindow
 
         app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         window = PersonnelCountWindow()
@@ -213,14 +213,14 @@ class QtCompatTest(unittest.TestCase):
         app.processEvents()
 
     def test_status_text_is_user_facing(self):
-        from personnel_count.app import user_status_text
+        from app.main import user_status_text
 
         self.assertEqual(user_status_text("waiting"), "等待人員通過")
         self.assertEqual(user_status_text("middle_only"), "人員在通道中")
         self.assertEqual(user_status_text("paused_multi_person"), "多人同框，暫停計數")
 
     def test_zone_color_follows_label_not_position(self):
-        from personnel_count.app import CameraWorker
+        from app.main import CameraWorker
 
         worker = CameraWorker.__new__(CameraWorker)
         self.assertEqual(worker._zone_color("A"), (255, 120, 0))
@@ -229,9 +229,9 @@ class QtCompatTest(unittest.TestCase):
 
 class DetectorResizeTest(unittest.TestCase):
     def test_prepare_frame_scales_1920_to_960(self):
-        from personnel_count.detector import PersonDetector
+        from detection.person import PersonDetector
 
-        with patch("personnel_count.detector.YOLOv10"):
+        with patch("detection.person.YOLOv10"):
             detector = PersonDetector({
                 "model": {
                     "path": "models/int8/best_cloth2_openvino_model",
@@ -248,9 +248,9 @@ class DetectorResizeTest(unittest.TestCase):
         self.assertEqual(scale_y, 2.0)
 
     def test_prepare_frame_keeps_small_frame(self):
-        from personnel_count.detector import PersonDetector
+        from detection.person import PersonDetector
 
-        with patch("personnel_count.detector.YOLOv10"):
+        with patch("detection.person.YOLOv10"):
             detector = PersonDetector({
                 "model": {
                     "path": "models/int8/best_cloth2_openvino_model",

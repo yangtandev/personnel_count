@@ -1,5 +1,5 @@
 import cv2
-from personnel_count.qt_compat import configure_runtime_environment
+from ui.qt_compat import configure_runtime_environment
 
 configure_runtime_environment()
 from PyQt5 import QtCore, QtGui, QtWidgets

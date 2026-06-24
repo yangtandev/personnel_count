@@ -5,7 +5,7 @@ from pathlib import Path
 
 import cv2
 
-from personnel_count.config import project_path
+from config.loader import project_path
 
 
 class Recorder:

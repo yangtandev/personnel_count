@@ -5,7 +5,7 @@ import threading
 import cv2
 from ultralytics import YOLOv10
 
-from personnel_count.config import project_path
+from config.loader import project_path
 
 
 @dataclass(frozen=True)
