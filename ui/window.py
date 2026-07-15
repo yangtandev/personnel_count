@@ -6,6 +6,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 
 
 class PersonnelCountWindow(QtWidgets.QWidget):
+    reset_counter_requested = QtCore.pyqtSignal()
+
     def __init__(self, title="人員停留數", camera_names=None):
         super().__init__()
         camera_names = camera_names or {"top": "井上", "bottom": "井底"}
@@ -19,6 +21,7 @@ class PersonnelCountWindow(QtWidgets.QWidget):
         self.top_view = QtWidgets.QLabel("")
         self.bottom_view = QtWidgets.QLabel("")
         self.count_label = QtWidgets.QLabel("人員停留數：0")
+        self.settings_button = QtWidgets.QPushButton("⚙", self)
 
         for view in (self.top_view, self.bottom_view):
             view.setAlignment(QtCore.Qt.AlignCenter)
@@ -27,6 +30,13 @@ class PersonnelCountWindow(QtWidgets.QWidget):
 
         self.count_label.setAlignment(QtCore.Qt.AlignCenter)
         self.count_label.setStyleSheet("font-weight:700;color:#111;")
+        self.settings_button.setFixedSize(44, 44)
+        self.settings_button.setToolTip("配置")
+        self.settings_button.setStyleSheet(
+            "background-color:rgba(0,0,0,120);color:white;border:0;"
+            "border-radius:5px;font-size:24px;"
+        )
+        self.settings_button.clicked.connect(self._open_settings)
 
         views = QtWidgets.QHBoxLayout()
         views.addWidget(self.top_view)
@@ -36,6 +46,7 @@ class PersonnelCountWindow(QtWidgets.QWidget):
         layout.addLayout(views, 1)
         layout.addWidget(self.count_label)
         self._update_font_sizes()
+        self._position_settings_button()
 
     def set_count(self, count):
         self.count_label.setText(f"人員停留數：{count}")
@@ -51,9 +62,14 @@ class PersonnelCountWindow(QtWidgets.QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._position_settings_button()
         self._update_font_sizes()
         for camera_name in self.camera_frames:
             self._render_camera(camera_name)
+        self.settings_button.raise_()
+
+    def _position_settings_button(self):
+        self.settings_button.move(10, 10)
 
     def _update_font_sizes(self):
         h = max(1, self.height())
@@ -115,3 +131,21 @@ class PersonnelCountWindow(QtWidgets.QWidget):
         x = rect.x() + max(0, (rect.width() - text_width) // 2)
         y = rect.y() + (rect.height() - metrics.height()) // 2 + metrics.ascent()
         painter.drawText(x, y, text)
+
+    def _open_settings(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("配置")
+        dialog.setModal(True)
+
+        reset_button = QtWidgets.QPushButton("計數器重置")
+        reset_button.setMinimumHeight(44)
+        reset_button.clicked.connect(self._reset_counter_from_settings)
+
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.addWidget(reset_button)
+        dialog.resize(260, 90)
+        dialog.exec_()
+
+    def _reset_counter_from_settings(self):
+        self.reset_counter_requested.emit()
+        QtWidgets.QMessageBox.information(self, "配置", "人員停留數已歸零")

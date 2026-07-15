@@ -5,6 +5,7 @@ config.json
 .cache/
 img_log/
 log/
+tests/
 
 # Python
 venv/

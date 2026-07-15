@@ -36,6 +36,18 @@ class ZoneCounter:
         )
 
     def zone_regions(self, width):
+        if "left_width_ratio" in self.zones or "right_width_ratio" in self.zones:
+            left_width = float(self.zones.get("left_width_ratio", 0.34))
+            right_width = float(self.zones.get("right_width_ratio", 0.34))
+            if left_width + right_width > 1:
+                left_width = right_width = 0.5
+            return (
+                0,
+                width * left_width,
+                width * (1 - right_width),
+                width,
+            )
+
         zone_w = width * float(self.zones.get("zone_width_ratio", 0.12))
         left_center = width * float(self.zones.get("left_ratio", 0.25))
         right_center = width * float(self.zones.get("right_ratio", 0.75))

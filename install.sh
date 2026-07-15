@@ -87,10 +87,8 @@ config = {
         "require_middle": False,
     },
     "zones": {
-        "left_ratio": 0.25,
-        "right_ratio": 0.75,
-        "zone_width_ratio": 0.18,
-        "mode": "side",
+        "left_width_ratio": 0.34,
+        "right_width_ratio": 0.34,
         "labels": {
             "top": {"left": "A", "right": "B"},
             "bottom": {"left": "B", "right": "A"},

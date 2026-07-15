@@ -47,8 +47,14 @@ class SharedState:
     def __init__(self, initial_count):
         self.lock = threading.Lock()
         self.count = int(initial_count)
+        self.reset_generation = 0
         self.frames = {}
         self.status = {"top": "starting", "bottom": "starting"}
+
+    def reset_count(self):
+        with self.lock:
+            self.count = 0
+            self.reset_generation += 1
 
 
 class CameraWorker(threading.Thread):
@@ -64,6 +70,7 @@ class CameraWorker(threading.Thread):
         self.last_snapshot_at = 0.0
         self.last_multi_person_at = 0.0
         self.stop_event = threading.Event()
+        self.reset_generation = shared.reset_generation
 
     def stop(self):
         self.stop_event.set()
@@ -88,6 +95,11 @@ class CameraWorker(threading.Thread):
 
             with self.shared.lock:
                 current_count = self.shared.count
+                reset_generation = self.shared.reset_generation
+            if reset_generation != self.reset_generation:
+                self.counter.reset()
+                self.reset_generation = reset_generation
+
             event, status, people = self.counter.update(detections, frame.shape, now, current_count)
             annotated = self._annotate(frame.copy(), detections, people, status)
 
@@ -102,10 +114,13 @@ class CameraWorker(threading.Thread):
                     self.last_multi_person_at = now
 
             if event is not None:
-                image_path = self.recorder.save_image(self.name, annotated, event.event)
                 with self.shared.lock:
-                    self.shared.count = event.count_after
-                self.recorder.record_event(event, image_path)
+                    should_record = reset_generation == self.shared.reset_generation
+                    if should_record:
+                        self.shared.count = event.count_after
+                if should_record:
+                    image_path = self.recorder.save_image(self.name, annotated, event.event)
+                    self.recorder.record_event(event, image_path)
 
             self._set_status(status)
             self._publish_frame(annotated)
@@ -169,6 +184,7 @@ class PersonnelCountApp:
             ui_config.get("window_title", "人員停留數"),
             ui_config.get("camera_names", {}),
         )
+        window.reset_counter_requested.connect(self.reset_count)
         if self.config.get("ui", {}).get("fullscreen", True):
             window.showFullScreen()
         else:
@@ -202,6 +218,10 @@ class PersonnelCountApp:
         window.set_camera_status("bottom", user_status_text(status.get("bottom")))
         for name, frame in frames.items():
             window.set_frame(name, frame)
+
+    def reset_count(self):
+        self.shared.reset_count()
+        self.recorder.record_status("counter reset to 0")
 
 
 def run(config_path):
