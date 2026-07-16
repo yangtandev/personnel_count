@@ -1,8 +1,31 @@
+import subprocess
+from pathlib import Path
+
 import cv2
 from ui.qt_compat import configure_runtime_environment
 
 configure_runtime_environment()
 from PyQt5 import QtCore, QtGui, QtWidgets
+
+
+def get_app_version():
+    root = Path(__file__).resolve().parent.parent
+    try:
+        for line in (root / "RELEASE_NOTES.md").read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("## v"):
+                return line.split()[1]
+    except Exception:
+        pass
+    try:
+        return subprocess.check_output(
+            ["git", "describe", "--tags", "--always"],
+            cwd=root,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return "unknown"
 
 
 class PersonnelCountWindow(QtWidgets.QWidget):
@@ -22,6 +45,7 @@ class PersonnelCountWindow(QtWidgets.QWidget):
         self.bottom_view = QtWidgets.QLabel("")
         self.count_label = QtWidgets.QLabel("人員停留數：0")
         self.settings_button = QtWidgets.QPushButton("⚙", self)
+        self.version_label = QtWidgets.QLabel(f"v{get_app_version().lstrip('v')}", self)
 
         for view in (self.top_view, self.bottom_view):
             view.setAlignment(QtCore.Qt.AlignCenter)
@@ -37,6 +61,10 @@ class PersonnelCountWindow(QtWidgets.QWidget):
             "border-radius:5px;font-size:24px;"
         )
         self.settings_button.clicked.connect(self._open_settings)
+        self.version_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignBottom)
+        self.version_label.setStyleSheet(
+            "background:transparent;color:rgba(0,0,0,170);font-size:14pt;"
+        )
 
         views = QtWidgets.QHBoxLayout()
         views.addWidget(self.top_view)
@@ -47,6 +75,7 @@ class PersonnelCountWindow(QtWidgets.QWidget):
         layout.addWidget(self.count_label)
         self._update_font_sizes()
         self._position_settings_button()
+        self._position_version_label()
 
     def set_count(self, count):
         self.count_label.setText(f"人員停留數：{count}")
@@ -63,13 +92,28 @@ class PersonnelCountWindow(QtWidgets.QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_settings_button()
+        self._position_version_label()
         self._update_font_sizes()
         for camera_name in self.camera_frames:
             self._render_camera(camera_name)
         self.settings_button.raise_()
+        self.version_label.raise_()
 
     def _position_settings_button(self):
         self.settings_button.move(10, 10)
+
+    def _position_version_label(self):
+        if self.width() < 20 or self.height() < 20:
+            self.version_label.hide()
+            return
+        self.version_label.adjustSize()
+        margin = 10
+        self.version_label.move(
+            self.width() - self.version_label.width() - margin,
+            self.height() - self.version_label.height() - margin,
+        )
+        self.version_label.show()
+        self.version_label.raise_()
 
     def _update_font_sizes(self):
         h = max(1, self.height())
