@@ -33,7 +33,6 @@ systemctl --user restart personnel_count.service
 
 - 截圖：`img_log/personnel_count/`
 - 系統 log：`log/personnel_count.log`
-- 事件 CSV：`log/personnel_count_events.csv`
 
 ## 計數規則
 

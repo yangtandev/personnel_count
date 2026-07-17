@@ -35,6 +35,7 @@ class PersonDetector:
         self.person_class_id = int(model_cfg.get("person_class_id", 1))
         self.min_conf = float(model_cfg.get("min_conf", 0.35))
         self.iou = float(model_cfg.get("iou", 0.45))
+        self.duplicate_iou = float(model_cfg.get("duplicate_iou", 0.75))
         self.inference_width = int(model_cfg.get("inference_width", 960) or 0)
         self.lock = threading.Lock()
 
@@ -56,7 +57,14 @@ class PersonDetector:
                 int(round(y2 * scale_y)),
             )
             detections.append(Detection(box, conf, cls_id))
-        return detections
+        return self._remove_duplicate_people(detections)
+
+    def _remove_duplicate_people(self, detections):
+        kept = []
+        for det in sorted(detections, key=lambda item: item.conf, reverse=True):
+            if all(_box_iou(det.box, other.box) <= self.duplicate_iou for other in kept):
+                kept.append(det)
+        return kept
 
     def _prepare_frame(self, frame):
         if self.inference_width <= 0:
@@ -68,3 +76,18 @@ class PersonDetector:
         new_height = max(1, int(round(height * (new_width / width))))
         resized = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
         return resized, width / new_width, height / new_height
+
+
+def _box_iou(a, b):
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if intersection == 0:
+        return 0.0
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    return intersection / max(1, area_a + area_b - intersection)

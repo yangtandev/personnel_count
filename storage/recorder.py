@@ -1,6 +1,5 @@
-import csv
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import cv2
@@ -19,32 +18,44 @@ class Recorder:
             self.log_dir = project_path(self.log_dir)
         self.img_dir.mkdir(parents=True, exist_ok=True)
         self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.events_path = self.log_dir / "personnel_count_events.csv"
+        self.camera_names = config.get("ui", {}).get("camera_names", {})
         self.logger = logging.getLogger("personnel_count")
         self.logger.setLevel(logging.INFO)
         self.logger.handlers.clear()
-        handler = logging.FileHandler(self.log_dir / "personnel_count.log", encoding="utf-8")
-        handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s"))
-        self.logger.addHandler(handler)
-        self.logger.addHandler(logging.StreamHandler())
-        self._ensure_csv()
+        self._log_date = None
+        self._log_handler = None
+        self._set_log_date(datetime.now().date())
 
-    def _ensure_csv(self):
-        if self.events_path.exists():
+    def _set_log_date(self, log_date):
+        if self._log_date == log_date:
             return
-        with self.events_path.open("w", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            writer.writerow([
-                "timestamp",
-                "camera",
-                "direction",
-                "event",
-                "count_before",
-                "count_after",
-                "confidence",
-                "image_path",
-                "status",
-            ])
+        if self._log_handler is not None:
+            self.logger.removeHandler(self._log_handler)
+            self._log_handler.close()
+
+        self._log_date = log_date
+        self._prune_daily_logs(log_date)
+        self._log_handler = logging.FileHandler(
+            self.log_dir / f"personnel_count_{log_date:%Y-%m-%d}.log",
+            encoding="utf-8",
+        )
+        self._log_handler.setFormatter(logging.Formatter("%(message)s"))
+        self.logger.addHandler(self._log_handler)
+
+    def _prune_daily_logs(self, today):
+        cutoff = today - timedelta(days=6)
+        prefix = "personnel_count_"
+        for path in self.log_dir.glob(f"{prefix}*.log"):
+            try:
+                log_date = datetime.strptime(path.stem[len(prefix):], "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if log_date < cutoff:
+                path.unlink()
+
+    def _write_log(self, now, message, *args):
+        self._set_log_date(now.date())
+        self.logger.info(message, *args)
 
     def save_image(self, camera, frame, reason):
         day_dir = self.img_dir / datetime.now().strftime("%Y-%m-%d")
@@ -55,34 +66,30 @@ class Recorder:
         return path
 
     def record_event(self, event, image_path):
-        ts = datetime.now().isoformat(timespec="seconds")
-        rel_path = Path(image_path)
-        try:
-            rel_path = rel_path.relative_to(project_path())
-        except ValueError:
-            pass
-        with self.events_path.open("a", newline="", encoding="utf-8") as fh:
-            writer = csv.writer(fh)
-            writer.writerow([
-                ts,
-                event.camera,
-                event.direction,
-                event.event,
-                event.count_before,
-                event.count_after,
-                f"{event.confidence:.3f}",
-                str(rel_path),
-                event.status,
-            ])
-        self.logger.info(
-            "%s %s %s count %s -> %s (%s)",
-            event.camera,
-            event.direction,
-            event.event,
-            event.count_before,
+        now = datetime.now()
+        camera_name = self.camera_names.get(event.camera, event.camera)
+        action = "進入" if event.event == "enter" else "離開"
+        delta = abs(event.count_after - event.count_before)
+        if delta == 0:
+            delta = 1
+        self._write_log(
+            now,
+            "%s %s%s %s 人，目前上下設備中共 %s 人。",
+            now.strftime("%Y-%m-%d %H:%M:%S"),
+            camera_name,
+            action,
+            delta,
             event.count_after,
-            event.status,
         )
 
     def record_status(self, message):
-        self.logger.info(message)
+        pass
+
+    def record_reset(self, count):
+        now = datetime.now()
+        self._write_log(
+            now,
+            "%s 觸發重置，目前上下設備中共 %s 人。",
+            now.strftime("%Y-%m-%d %H:%M:%S"),
+            count,
+        )
