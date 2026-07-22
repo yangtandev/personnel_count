@@ -123,7 +123,6 @@ class VideoCapture:
         ]
         if transport == "tcp":
             options.extend(['-rtsp_flags', 'prefer_tcp'])
-        options.extend(['-timeout', self._connect_timeout_us()])
         return options
 
     def _get_video_info_for_raw_pipeline(self, transport):
