@@ -1,3 +1,4 @@
+import json
 import queue
 import subprocess
 import threading
@@ -30,6 +31,10 @@ def get_best_hw_accel():
             stderr=subprocess.DEVNULL
         )
         if 'vaapi' in hwaccels_output:
+            if not os.path.exists('/dev/dri/renderD128'):
+                print("⚠️ FFmpeg supports 'vaapi', but no VAAPI render device found. Using CPU.")
+                _best_decoder_info['name'] = 'cpu'
+                return 'cpu'
             print("✅ Found 'vaapi' hardware acceleration support.")
             _best_decoder_info['name'] = 'vaapi'
             return 'vaapi'
@@ -57,6 +62,9 @@ def _safe_url(url):
         return parsed._replace(netloc=f"{auth}:***@{host}").geturl()
     return url
 
+def _safe_output(text, url):
+    return str(text).replace(url, _safe_url(url))
+
 # --- VideoCapture Class ---
 
 class VideoCapture:
@@ -76,6 +84,7 @@ class VideoCapture:
         
         self.width = None
         self.height = None
+        self.codec_name = None
         self._current_rtsp_transport = self._rtsp_transports()[0]
         
         self.thread = threading.Thread(target=self._reader_manager)
@@ -108,10 +117,14 @@ class VideoCapture:
         return transports or ["tcp", "udp"]
 
     def _rtsp_input_options_for(self, transport):
-        return [
+        options = [
             '-rtsp_transport', transport,
-            '-timeout', self._connect_timeout_us(),
+            '-allowed_media_types', 'video',
         ]
+        if transport == "tcp":
+            options.extend(['-rtsp_flags', 'prefer_tcp'])
+        options.extend(['-timeout', self._connect_timeout_us()])
+        return options
 
     def _get_video_info_for_raw_pipeline(self, transport):
         """Uses ffprobe to get resolution needed for the raw video pipeline."""
@@ -119,18 +132,30 @@ class VideoCapture:
         try:
             command = [
                 'ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0',
+                '-show_entries', 'stream=codec_name,width,height', '-of', 'json',
             ] + self._rtsp_input_options_for(transport) + [self.rtsp_url]
             timeout = self.config.get("ffprobe_timeout") or 5  # [2026-04-24] Default 5s to prevent hang
-            output = subprocess.check_output(command, text=True, stderr=subprocess.STDOUT, timeout=timeout).strip()
-            self.width, self.height = map(int, output.split('x'))
+            result = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
+            if result.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    result.returncode,
+                    command,
+                    output=(result.stderr or result.stdout).strip(),
+                )
+            output = result.stdout.strip()
+            stream = json.loads(output)["streams"][0]
+            self.width, self.height = int(stream["width"]), int(stream["height"])
+            self.codec_name = stream.get("codec_name")
+            if self.width <= 0 or self.height <= 0:
+                raise ValueError(f"invalid stream size {self.width}x{self.height}")
             self._current_rtsp_transport = transport
-            print(f"Raw Pipeline: Detected resolution {self.width}x{self.height} via {transport.upper()}.")
+            print(f"Raw Pipeline: Detected {self.codec_name or 'video'} {self.width}x{self.height} via {transport.upper()}.")
             return True
         except subprocess.CalledProcessError as e:
-            print(f"Raw Pipeline: ffprobe via {transport.upper()} failed: {e.output.strip() or e}.")
+            output = _safe_output(e.output.strip(), self.rtsp_url) if e.output else e
+            print(f"Raw Pipeline: ffprobe via {transport.upper()} failed: {output}.")
         except Exception as e:
-            print(f"Raw Pipeline: ffprobe via {transport.upper()} failed: {e}.")
+            print(f"Raw Pipeline: ffprobe via {transport.upper()} failed: {_safe_output(e, self.rtsp_url)}.")
         return False
 
     def _probe_video_info_for_raw_pipeline(self):
@@ -140,13 +165,20 @@ class VideoCapture:
         print("Raw Pipeline: ffprobe failed for all RTSP transports. Cannot use raw video pipeline.")
         return False
 
+    def _has_video_info(self):
+        return bool(self.width and self.height and self.width > 0 and self.height > 0)
+
     def _start_raw_video_pipeline(self, use_hw_accel=False, error_tolerant=False):
         """Attempts to start a raw video pipeline, with optional HW accel and error tolerance."""
         pipeline_type = "HW Accel Raw" if use_hw_accel else "Err-Tolerant Raw"
         print(f"Attempting {pipeline_type} pipeline for {_safe_url(self.rtsp_url)}...")
 
-        if not self._probe_video_info_for_raw_pipeline():
+        if not self._has_video_info() and not self._probe_video_info_for_raw_pipeline():
             return False # Cannot proceed without resolution
+
+        if use_hw_accel and self.codec_name == "h264":
+            print("HW Accel Raw: Skipping VAAPI for H264 to avoid buffered latency.")
+            return False
 
         if self.width is None or self.height is None:
             raise RuntimeError(f"Failed to determine stream resolution for {pipeline_type}.")
