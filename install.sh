@@ -74,7 +74,7 @@ config = {
     "model": {
         "path": "models/int8/best_cloth2_openvino_model",
         "person_class_id": 1,
-        "min_conf": 0.35,
+        "min_conf": 0.5,
         "iou": 0.45,
         "inference_width": 960,
     },
