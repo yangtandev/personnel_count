@@ -167,10 +167,17 @@ class PersonnelCountApp:
         self.detector = PersonDetector(self.config)
         self.shared = SharedState(self.config["counter"].get("initial_count", 0))
         cameras = self.config["camera"]
+        self.single_camera = self._same_camera(cameras.get("top"), cameras.get("bottom"))
         self.workers = [
             CameraWorker("top", cameras["top"], self.config, self.detector, self.recorder, self.shared),
-            CameraWorker("bottom", cameras["bottom"], self.config, self.detector, self.recorder, self.shared),
         ]
+        if not self.single_camera:
+            self.workers.append(
+                CameraWorker("bottom", cameras["bottom"], self.config, self.detector, self.recorder, self.shared)
+            )
+
+    def _same_camera(self, top_url, bottom_url):
+        return str(top_url or "").strip() == str(bottom_url or "").strip()
 
     def run(self):
         qt_app = QtWidgets.QApplication(sys.argv)
@@ -178,6 +185,7 @@ class PersonnelCountApp:
         window = PersonnelCountWindow(
             ui_config.get("window_title", "人員停留數"),
             ui_config.get("camera_names", {}),
+            single_camera=self.single_camera,
         )
         window.reset_counter_requested.connect(self.reset_count)
         if self.config.get("ui", {}).get("fullscreen", True):
@@ -210,7 +218,8 @@ class PersonnelCountApp:
             status = dict(self.shared.status)
         window.set_count(count)
         window.set_camera_status("top", user_status_text(status.get("top")))
-        window.set_camera_status("bottom", user_status_text(status.get("bottom")))
+        if not self.single_camera:
+            window.set_camera_status("bottom", user_status_text(status.get("bottom")))
         for name, frame in frames.items():
             window.set_frame(name, frame)
 

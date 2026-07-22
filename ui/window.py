@@ -31,9 +31,10 @@ def get_app_version():
 class PersonnelCountWindow(QtWidgets.QWidget):
     reset_counter_requested = QtCore.pyqtSignal()
 
-    def __init__(self, title="人員停留數", camera_names=None):
+    def __init__(self, title="人員停留數", camera_names=None, single_camera=False):
         super().__init__()
         camera_names = camera_names or {"top": "井上", "bottom": "井底"}
+        self.single_camera = single_camera
         self.setWindowTitle(title)
         self.camera_titles = {
             "top": camera_names.get("top", "井上"),
@@ -68,7 +69,8 @@ class PersonnelCountWindow(QtWidgets.QWidget):
 
         views = QtWidgets.QHBoxLayout()
         views.addWidget(self.top_view)
-        views.addWidget(self.bottom_view)
+        if not self.single_camera:
+            views.addWidget(self.bottom_view)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.addLayout(views, 1)
@@ -81,11 +83,15 @@ class PersonnelCountWindow(QtWidgets.QWidget):
         self.count_label.setText(f"人員停留數：{count}")
 
     def set_camera_status(self, camera_name, text):
+        if self.single_camera and camera_name == "bottom":
+            return
         self.camera_statuses[camera_name] = text
         if camera_name in self.camera_frames:
             self._render_camera(camera_name)
 
     def set_frame(self, camera_name, frame):
+        if self.single_camera and camera_name == "bottom":
+            return
         self.camera_frames[camera_name] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         self._render_camera(camera_name)
 
