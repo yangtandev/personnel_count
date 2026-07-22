@@ -45,6 +45,18 @@ def _ignore_sigint():
     """Function to be called in the child process to ignore SIGINT."""
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
+def _safe_url(url):
+    parsed = urlparse(url)
+    if not parsed.password:
+        return url
+    auth = parsed.username or ""
+    if parsed.hostname:
+        host = parsed.hostname
+        if parsed.port:
+            host += f":{parsed.port}"
+        return parsed._replace(netloc=f"{auth}:***@{host}").geturl()
+    return url
+
 # --- VideoCapture Class ---
 
 class VideoCapture:
@@ -64,6 +76,7 @@ class VideoCapture:
         
         self.width = None
         self.height = None
+        self._current_rtsp_transport = self._rtsp_transports()[0]
         
         self.thread = threading.Thread(target=self._reader_manager)
         self.thread.daemon = True
@@ -83,35 +96,56 @@ class VideoCapture:
             return 2.0
 
     def _rtsp_input_options(self):
+        return self._rtsp_input_options_for(self._current_rtsp_transport)
+
+    def _rtsp_transports(self):
+        value = self.config.get("rtsp_transport", ["tcp", "udp"])
+        if isinstance(value, str):
+            transports = [item.strip().lower() for item in value.replace("+", ",").split(",")]
+        else:
+            transports = [str(item).strip().lower() for item in value]
+        transports = [item for item in transports if item in {"tcp", "udp"}]
+        return transports or ["tcp", "udp"]
+
+    def _rtsp_input_options_for(self, transport):
         return [
-            '-rtsp_transport', 'tcp',
-            '-rtsp_flags', 'prefer_tcp',
+            '-rtsp_transport', transport,
             '-timeout', self._connect_timeout_us(),
         ]
 
-    def _get_video_info_for_raw_pipeline(self):
+    def _get_video_info_for_raw_pipeline(self, transport):
         """Uses ffprobe to get resolution needed for the raw video pipeline."""
-        print("Probing video stream for resolution (for raw pipeline)...")
+        print(f"Probing video stream via {transport.upper()} for resolution (for raw pipeline)...")
         try:
             command = [
                 'ffprobe', '-v', 'error', '-select_streams', 'v:0',
                 '-show_entries', 'stream=width,height', '-of', 'csv=s=x:p=0',
-            ] + self._rtsp_input_options() + [self.rtsp_url]
+            ] + self._rtsp_input_options_for(transport) + [self.rtsp_url]
             timeout = self.config.get("ffprobe_timeout") or 5  # [2026-04-24] Default 5s to prevent hang
-            output = subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL, timeout=timeout).strip()
+            output = subprocess.check_output(command, text=True, stderr=subprocess.STDOUT, timeout=timeout).strip()
             self.width, self.height = map(int, output.split('x'))
-            print(f"Raw Pipeline: Detected resolution {self.width}x{self.height}.")
+            self._current_rtsp_transport = transport
+            print(f"Raw Pipeline: Detected resolution {self.width}x{self.height} via {transport.upper()}.")
             return True
+        except subprocess.CalledProcessError as e:
+            print(f"Raw Pipeline: ffprobe via {transport.upper()} failed: {e.output.strip() or e}.")
         except Exception as e:
-            print(f"Raw Pipeline: ffprobe failed: {e}. Cannot use raw video pipeline.")
-            return False
+            print(f"Raw Pipeline: ffprobe via {transport.upper()} failed: {e}.")
+        return False
+
+    def _probe_video_info_for_raw_pipeline(self):
+        for transport in self._rtsp_transports():
+            if self._get_video_info_for_raw_pipeline(transport):
+                return True
+        print("Raw Pipeline: ffprobe failed for all RTSP transports. Cannot use raw video pipeline.")
+        return False
 
     def _start_raw_video_pipeline(self, use_hw_accel=False, error_tolerant=False):
         """Attempts to start a raw video pipeline, with optional HW accel and error tolerance."""
         pipeline_type = "HW Accel Raw" if use_hw_accel else "Err-Tolerant Raw"
-        print(f"Attempting {pipeline_type} pipeline for {self.rtsp_url}...")
+        print(f"Attempting {pipeline_type} pipeline for {_safe_url(self.rtsp_url)}...")
 
-        if not self._get_video_info_for_raw_pipeline():
+        if not self._probe_video_info_for_raw_pipeline():
             return False # Cannot proceed without resolution
 
         if self.width is None or self.height is None:
@@ -169,7 +203,7 @@ class VideoCapture:
 
     def _start_sw_mjpeg_pipeline(self):
         """Starts the robust but slower MJPEG software pipeline."""
-        print(f"Starting software MJPEG pipeline for {self.rtsp_url}...")
+        print(f"Starting software MJPEG pipeline for {_safe_url(self.rtsp_url)} via {self._current_rtsp_transport.upper()}...")
         command = [
             'ffmpeg', '-hide_banner', '-loglevel', 'error',
             *self._rtsp_input_options(),
@@ -253,7 +287,7 @@ class VideoCapture:
 
     def terminate(self):
         """Stops the reader thread and terminates the FFmpeg subprocess gracefully."""
-        print(f"Terminating camera connection to {self.rtsp_url}...")
+        print(f"Terminating camera connection to {_safe_url(self.rtsp_url)}...")
         self.stop_threads = True
         
         # [2026-01-19 Fix] Avoid race condition between terminate() and _reader_manager()
@@ -276,4 +310,4 @@ class VideoCapture:
             if self.thread.is_alive():
                 print("Warning: Camera thread did not exit in time.")
                 
-        print(f"Camera connection for {self.rtsp_url} terminated.")
+        print(f"Camera connection for {_safe_url(self.rtsp_url)} terminated.")
