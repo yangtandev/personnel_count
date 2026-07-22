@@ -84,15 +84,10 @@ config = {
         "lost_timeout_sec": 2.0,
         "event_cooldown_sec": 1.5,
         "snapshot_interval_sec": 1.0,
-        "require_middle": False,
     },
     "zones": {
-        "left_width_ratio": 0.34,
-        "right_width_ratio": 0.34,
-        "labels": {
-            "top": {"left": "A", "right": "B"},
-            "bottom": {"left": "B", "right": "A"},
-        },
+        "zone_point_y_ratio": 0.35,
+        "regions": {},
     },
     "direction": {
         "top": {"A_to_B": "enter", "B_to_A": "exit"},

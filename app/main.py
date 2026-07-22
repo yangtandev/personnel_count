@@ -4,6 +4,7 @@ import threading
 import time
 
 import cv2
+import numpy as np
 from ui.qt_compat import configure_runtime_environment
 
 configure_runtime_environment()
@@ -22,7 +23,6 @@ STATUS_TEXT = {
     "camera_waiting": "等待攝影機畫面",
     "detector_error": "偵測異常",
     "waiting": "等待人員通過",
-    "middle_only": "人員在通道中",
     "tracking": "追蹤人員移動中",
     "paused_multi_person": "多人同框，暫停計數",
     "incomplete_path": "路徑未完成，未計數",
@@ -30,10 +30,6 @@ STATUS_TEXT = {
     "unknown_direction": "方向不明，未計數",
     "counted_enter": "已計入進入",
     "counted_exit": "已計入離開",
-    "A_to_middle": "從 A 區往中間移動",
-    "B_to_middle": "從 B 區往中間移動",
-    "returned_A": "折返 A 區，未計數",
-    "returned_B": "折返 B 區，未計數",
     "seen_A": "人員位於 A 區",
     "seen_B": "人員位於 B 區",
 }
@@ -135,22 +131,34 @@ class CameraWorker(threading.Thread):
             x1, y1, x2, y2 = det.box
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, f"person {det.conf:.2f}", (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            if det in people:
+                point_x, point_y = self.counter.detection_point(det)
+                cv2.circle(frame, (int(point_x), int(point_y)), 6, color, -1)
         return frame
 
     def _draw_zones(self, frame):
         h, w = frame.shape[:2]
-        left_label, right_label = self.counter.zone_layout()
-        left_x1, left_x2, right_x1, right_x2 = self.counter.zone_regions(w)
-        for label, x1, x2, color in (
-            (left_label, left_x1, left_x2, self._zone_color(left_label)),
-            (right_label, right_x1, right_x2, self._zone_color(right_label)),
-        ):
-            x1 = int(x1)
-            x2 = int(x2)
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (x1, 0), (x2, h), color, -1)
-            cv2.addWeighted(overlay, 0.18, frame, 0.82, 0, frame)
-            cv2.putText(frame, label, (x1 + 12, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+        default_label, _ = self.counter.zone_layout()
+        default_color = self._zone_color(default_label)
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, h), default_color, -1)
+        cv2.addWeighted(overlay, 0.08, frame, 0.92, 0, frame)
+        cv2.rectangle(frame, (0, 0), (w - 1, h - 1), default_color, 2)
+        cv2.putText(frame, default_label, (12, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.2, default_color, 3)
+
+        polygons = self.counter.zone_polygons(w, h)
+        if polygons:
+            for label, polygon in polygons:
+                points = np.array([[int(x), int(y)] for x, y in polygon], dtype=np.int32)
+                color = self._zone_color(label)
+                overlay = frame.copy()
+                cv2.fillPoly(overlay, [points], color)
+                cv2.addWeighted(overlay, 0.18, frame, 0.82, 0, frame)
+                cv2.polylines(frame, [points], True, color, 3)
+                label_x = int(sum(x for x, _ in polygon) / len(polygon))
+                label_y = int(sum(y for _, y in polygon) / len(polygon))
+                cv2.putText(frame, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+            return
 
     def _zone_color(self, label):
         if label == "A":
