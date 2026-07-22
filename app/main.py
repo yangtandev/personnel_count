@@ -144,7 +144,7 @@ class CameraWorker(threading.Thread):
         cv2.rectangle(overlay, (0, 0), (w, h), default_color, -1)
         cv2.addWeighted(overlay, 0.08, frame, 0.92, 0, frame)
         cv2.rectangle(frame, (0, 0), (w - 1, h - 1), default_color, 2)
-        cv2.putText(frame, default_label, (12, 42), cv2.FONT_HERSHEY_SIMPLEX, 1.2, default_color, 3)
+        cv2.putText(frame, default_label, (12, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 1.2, default_color, 3)
 
         polygons = self.counter.zone_polygons(w, h)
         if polygons:
@@ -155,9 +155,8 @@ class CameraWorker(threading.Thread):
                 cv2.fillPoly(overlay, [points], color)
                 cv2.addWeighted(overlay, 0.18, frame, 0.82, 0, frame)
                 cv2.polylines(frame, [points], True, color, 3)
-                label_x = int(sum(x for x, _ in polygon) / len(polygon))
-                label_y = int(sum(y for _, y in polygon) / len(polygon))
-                cv2.putText(frame, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+                x, y, box_w, box_h = cv2.boundingRect(points)
+                cv2.putText(frame, label, (x + box_w - 36, y + 42), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
             return
 
     def _zone_color(self, label):
