@@ -1,4 +1,5 @@
 import logging
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -53,14 +54,28 @@ class Recorder:
             if log_date < cutoff:
                 path.unlink()
 
+    def _prune_daily_images(self, today):
+        cutoff = today - timedelta(days=6)
+        for path in self.img_dir.iterdir():
+            if not path.is_dir():
+                continue
+            try:
+                image_date = datetime.strptime(path.name, "%Y-%m-%d").date()
+            except ValueError:
+                continue
+            if image_date < cutoff:
+                shutil.rmtree(path)
+
     def _write_log(self, now, message, *args):
         self._set_log_date(now.date())
         self.logger.info(message, *args)
 
     def save_image(self, camera, frame, reason):
-        day_dir = self.img_dir / datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now()
+        self._prune_daily_images(now.date())
+        day_dir = self.img_dir / now.strftime("%Y-%m-%d")
         day_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{camera}_{datetime.now().strftime('%H%M%S_%f')}_{reason}.jpg"
+        filename = f"{camera}_{now.strftime('%H%M%S_%f')}_{reason}.jpg"
         path = day_dir / filename
         cv2.imwrite(str(path), frame)
         return path
