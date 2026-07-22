@@ -62,8 +62,6 @@ class CameraWorker(threading.Thread):
         self.recorder = recorder
         self.shared = shared
         self.counter = ZoneCounter(name, config)
-        self.snapshot_interval = float(config["counter"].get("snapshot_interval_sec", 1.0))
-        self.last_multi_person_at = 0.0
         self.stop_event = threading.Event()
         self.reset_generation = shared.reset_generation
 
@@ -97,12 +95,6 @@ class CameraWorker(threading.Thread):
 
             event, status, people = self.counter.update(detections, frame.shape, now, current_count)
             annotated = self._annotate(frame.copy(), detections, people, status)
-
-            if status == "paused_multi_person":
-                if now - self.last_multi_person_at >= self.snapshot_interval:
-                    self.recorder.save_image(self.name, annotated, "multi_person")
-                    self.recorder.record_status(f"{self.name} paused_multi_person")
-                    self.last_multi_person_at = now
 
             if event is not None:
                 with self.shared.lock:

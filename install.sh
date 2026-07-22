@@ -83,7 +83,6 @@ config = {
         "min_person_area_ratio": 0.02,
         "lost_timeout_sec": 2.0,
         "event_cooldown_sec": 1.5,
-        "snapshot_interval_sec": 1.0,
     },
     "zones": {
         "zone_point_y_ratio": 0.35,
