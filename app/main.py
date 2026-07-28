@@ -149,7 +149,8 @@ class CameraWorker(threading.Thread):
             cv2.addWeighted(overlay, 0.18, frame, 0.82, 0, frame)
             cv2.polylines(frame, [points], True, color, 3)
             x, y, box_w, box_h = cv2.boundingRect(points)
-            cv2.putText(frame, label, (x + box_w - 36, y + 42), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+            label_x = x + (30 if label == "A" else 12)
+            cv2.putText(frame, label, (label_x, y + box_h - 12), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
 
     def _zone_color(self, label):
         if label == "A":
