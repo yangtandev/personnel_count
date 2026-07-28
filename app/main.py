@@ -148,9 +148,42 @@ class CameraWorker(threading.Thread):
             cv2.fillPoly(overlay, [points], color)
             cv2.addWeighted(overlay, 0.18, frame, 0.82, 0, frame)
             cv2.polylines(frame, [points], True, color, 3)
-            x, y, box_w, box_h = cv2.boundingRect(points)
-            label_x = x + (30 if label == "A" else 12)
-            cv2.putText(frame, label, (label_x, y + box_h - 12), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+            cv2.putText(frame, label, self._zone_label_origin(label, points), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
+
+    def _zone_label_origin(self, label, points):
+        x, y, box_w, box_h = cv2.boundingRect(points)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 1.2
+        thickness = 3
+        (text_w, text_h), baseline = cv2.getTextSize(label, font, font_scale, thickness)
+        left_margin = 30 if label == "A" else 12
+        min_x = x + left_margin
+        max_x = x + box_w - text_w - 4
+        min_y = y + text_h + 4
+        max_y = y + box_h - baseline - 12
+        for label_y in range(max_y, min_y - 1, -4):
+            for label_x in range(min_x, max_x + 1, 4):
+                if self._text_box_inside_polygon(points, label_x, label_y, text_w, text_h, baseline):
+                    return label_x, label_y
+        for label_y in range(y + box_h - 4, y + 3, -4):
+            for label_x in range(x + 4, x + box_w - 3, 4):
+                if cv2.pointPolygonTest(points, (label_x, label_y), False) >= 0:
+                    return label_x, label_y
+        return x + 4, y + text_h + 4
+
+    def _text_box_inside_polygon(self, points, x, y, text_w, text_h, baseline):
+        check_points = (
+            (x, y - text_h),
+            (x + text_w // 2, y - text_h),
+            (x + text_w, y - text_h),
+            (x, y - text_h // 2),
+            (x + text_w, y - text_h // 2),
+            (x, y + baseline),
+            (x + text_w // 2, y + baseline),
+            (x + text_w, y + baseline),
+            (x + text_w // 2, y - text_h // 2),
+        )
+        return all(cv2.pointPolygonTest(points, point, False) >= 0 for point in check_points)
 
     def _zone_color(self, label):
         if label == "A":
