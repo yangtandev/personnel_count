@@ -16,12 +16,14 @@ from config.loader import DEFAULT_CONFIG_PATH, load_config
 
 
 COLORS = {
+    "A": (255, 120, 0),
     "B": (0, 220, 255),
 }
+LABELS = ("A", "B")
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Capture one frame and draw the B counting zone.")
+    parser = argparse.ArgumentParser(description="Capture one frame and draw A/B counting zones.")
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="config path")
     parser.add_argument("--camera", default="top", choices=("top", "bottom"), help="camera name")
     parser.add_argument("--output", help="output config path. default: overwrite --config")
@@ -47,24 +49,36 @@ def normalized(points, width, height):
     return [[round(x / width, 4), round(y / height, 4)] for x, y in points]
 
 
-def draw_preview(frame, points):
+def denormalized(points, width, height):
+    denorm = []
+    for x, y in points or []:
+        if -1.0 <= x <= 1.0 and -1.0 <= y <= 1.0:
+            x *= width
+            y *= height
+        denorm.append((int(round(x)), int(round(y))))
+    return denorm
+
+
+def draw_preview(frame, zone_points, active_label):
     preview = frame.copy()
     overlay = preview.copy()
-    color = COLORS["B"]
-    if len(points) >= 3:
-        polygon = np.array(points, dtype=np.int32)
-        cv2.fillPoly(overlay, [polygon], color)
-        cv2.polylines(preview, [polygon], True, color, 3)
-    for index, point in enumerate(points):
-        cv2.circle(preview, point, 5, color, -1)
-        if index:
-            cv2.line(preview, points[index - 1], point, color, 2)
-    if points:
-        cv2.putText(preview, "B", points[0], cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, 3)
+    for label in LABELS:
+        points = zone_points[label]
+        color = COLORS[label]
+        if len(points) >= 3:
+            polygon = np.array(points, dtype=np.int32)
+            cv2.fillPoly(overlay, [polygon], color)
+            cv2.polylines(preview, [polygon], True, color, 3)
+        for index, point in enumerate(points):
+            cv2.circle(preview, point, 6 if label == active_label else 4, color, -1)
+            if index:
+                cv2.line(preview, points[index - 1], point, color, 2)
+        if points:
+            cv2.putText(preview, label, points[0], cv2.FONT_HERSHEY_SIMPLEX, 1.1, color, 3)
     cv2.addWeighted(overlay, 0.18, preview, 0.82, 0, preview)
     cv2.putText(
         preview,
-        "Draw B zone | left-click add | right-click or U undo | R reset | S save | Q quit",
+        f"Drawing {active_label} | A/B switch | left-click add | right-click or U undo | R reset | S save | Q quit",
         (16, 32),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
@@ -74,11 +88,21 @@ def draw_preview(frame, points):
     return preview
 
 
-def edit_zone(frame):
-    points = []
+def existing_zone_points(config, camera_name, frame_shape):
+    height, width = frame_shape[:2]
+    regions = config.get("zones", {}).get("regions", {})
+    camera_regions = regions.get(camera_name, regions) if isinstance(regions, dict) else {}
+    if not isinstance(camera_regions, dict):
+        camera_regions = {}
+    return {label: denormalized(camera_regions.get(label), width, height) for label in LABELS}
+
+
+def edit_zones(frame, zone_points):
+    active_label = "A"
     window = "calibrate_zones"
 
     def on_mouse(event, x, y, *_):
+        points = zone_points[active_label]
         if event == cv2.EVENT_LBUTTONDOWN:
             points.append((x, y))
         elif event == cv2.EVENT_RBUTTONDOWN and points:
@@ -88,9 +112,14 @@ def edit_zone(frame):
     cv2.setMouseCallback(window, on_mouse)
 
     while True:
-        cv2.imshow(window, draw_preview(frame, points))
+        cv2.imshow(window, draw_preview(frame, zone_points, active_label))
         key = cv2.waitKey(30) & 0xFF
-        if key in (ord("u"), ord("U"), 8) and points:
+        points = zone_points[active_label]
+        if key in (ord("a"), ord("A")):
+            active_label = "A"
+        elif key in (ord("b"), ord("B")):
+            active_label = "B"
+        elif key in (ord("u"), ord("U"), 8) and points:
             points.pop()
         elif key in (ord("r"), ord("R")):
             points.clear()
@@ -98,14 +127,15 @@ def edit_zone(frame):
             cv2.destroyWindow(window)
             return None
         elif key in (ord("s"), ord("S")):
-            if len(points) < 3:
-                print("Need at least 3 points for B")
+            missing = [label for label in LABELS if len(zone_points[label]) < 3]
+            if missing:
+                print(f"Need at least 3 points for {', '.join(missing)}")
                 continue
             cv2.destroyWindow(window)
-            return points
+            return zone_points
 
 
-def save_zone(config, config_path, output_path, camera_name, points, frame_shape):
+def save_zones(config, config_path, output_path, camera_name, zone_points, frame_shape):
     height, width = frame_shape[:2]
     zone_config = config.setdefault("zones", {})
     for key in ("left_width_ratio", "right_width_ratio", "zone_width_ratio", "left_ratio", "right_ratio", "mode", "labels"):
@@ -113,7 +143,7 @@ def save_zone(config, config_path, output_path, camera_name, points, frame_shape
     config.get("counter", {}).pop("require_middle", None)
 
     regions = zone_config.setdefault("regions", {})
-    regions[camera_name] = {"B": normalized(points, width, height)}
+    regions[camera_name] = {label: normalized(zone_points[label], width, height) for label in LABELS}
     zone_config.setdefault("zone_point_y_ratio", 0.35)
 
     path = Path(output_path or config_path)
@@ -133,13 +163,13 @@ def main():
     else:
         frame = grab_frame(config, args.camera, args.timeout)
 
-    points = edit_zone(frame)
-    if points is None:
+    zone_points = edit_zones(frame, existing_zone_points(config, args.camera, frame.shape))
+    if zone_points is None:
         print("Canceled. Config unchanged.")
         return 1
 
-    path = save_zone(config, args.config, args.output, args.camera, points, frame.shape)
-    print(f"Saved {args.camera} B zone to {path}")
+    path = save_zones(config, args.config, args.output, args.camera, zone_points, frame.shape)
+    print(f"Saved {args.camera} A/B zones to {path}")
     return 0
 
 

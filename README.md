@@ -8,9 +8,9 @@
 python main.py --config config.json
 ```
 
-## 校正 B 區
+## 校正 A/B 區
 
-抓一張現場攝影機畫面，手動畫 B 區並存回 `config.json`。B 區以外全部視為 A 區：
+抓一張現場攝影機畫面，手動畫 A/B 區並存回 `config.json`：
 
 ```bash
 python tools/calibrate_zones.py --config config.json --camera top
@@ -28,12 +28,13 @@ python tools/calibrate_zones.py --config config.json --camera top --image calibr
 操作：
 
 - 滑鼠左鍵：新增一個點
-- 滑鼠右鍵或 `U`：復原上一個點
-- `R`：清空 B 區
-- `S`：儲存，至少 3 點
+- `A` / `B`：切換目前畫的區域
+- 滑鼠右鍵或 `U`：復原目前區域上一個點
+- `R`：清空目前區域
+- `S`：儲存，A/B 都至少 3 點
 - `Q` 或 `Esc`：取消
 
-儲存後，辨識畫面會顯示手動畫出的 B 區。判斷點在 B 區內是 B，否則是 A。判斷點預設在人框上方往下 35%，可用 `zones.zone_point_y_ratio` 調整。
+儲存後，辨識畫面會顯示手動畫出的 A/B 區。判斷點在 A 區內是 A，在 B 區內是 B；兩區外不觸發 A/B 轉換。判斷點預設在人框上方往下 35%，可用 `zones.zone_point_y_ratio` 調整。
 
 ## 安裝
 

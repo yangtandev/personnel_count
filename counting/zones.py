@@ -40,11 +40,13 @@ class ZoneCounter:
         if not isinstance(camera_regions, dict):
             return []
 
-        _, target_label = self.zone_layout()
-        polygon = self._scale_polygon(camera_regions.get(target_label, camera_regions.get("B")), width, height)
-        if len(polygon) < 3:
-            return []
-        return [(target_label, polygon)]
+        default_label, target_label = self.zone_layout()
+        polygons = []
+        for label in (default_label, target_label):
+            polygon = self._scale_polygon(camera_regions.get(label), width, height)
+            if len(polygon) >= 3:
+                polygons.append((label, polygon))
+        return polygons
 
     def detection_point(self, detection):
         x1, y1, x2, y2 = detection.box
@@ -55,10 +57,15 @@ class ZoneCounter:
 
     def zone_for_point(self, x, y, width, height):
         default_label, target_label = self.zone_layout()
-        for _, polygon in self.zone_polygons(width, height):
-            if _point_in_polygon(x, y, polygon):
-                return target_label
-        return default_label
+        polygons = dict(self.zone_polygons(width, height))
+        for label in (target_label, default_label):
+            polygon = polygons.get(label)
+            if polygon and _point_in_polygon(x, y, polygon):
+                return label
+
+        if default_label not in polygons and target_label in polygons:
+            return default_label
+        return None
 
     def _scale_polygon(self, points, width, height):
         if not isinstance(points, list):
@@ -99,6 +106,10 @@ class ZoneCounter:
         self.last_seen_at = now
         point_x, point_y = self.detection_point(person)
         zone = self.zone_for_point(point_x, point_y, width, height)
+
+        if zone is None:
+            self.status = "outside_zones" if self.anchor_zone is None else "tracking"
+            return None, self.status, people
 
         if now < self.cooldown_until:
             self.status = "cooldown"

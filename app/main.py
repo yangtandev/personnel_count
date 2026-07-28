@@ -23,6 +23,7 @@ STATUS_TEXT = {
     "camera_waiting": "等待攝影機畫面",
     "detector_error": "偵測異常",
     "waiting": "等待人員通過",
+    "outside_zones": "人員不在 A/B 區",
     "tracking": "追蹤人員移動中",
     "paused_multi_person": "多人同框，暫停計數",
     "incomplete_path": "路徑未完成，未計數",
@@ -132,24 +133,23 @@ class CameraWorker(threading.Thread):
         h, w = frame.shape[:2]
         default_label, _ = self.counter.zone_layout()
         default_color = self._zone_color(default_label)
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (w, h), default_color, -1)
-        cv2.addWeighted(overlay, 0.08, frame, 0.92, 0, frame)
-        cv2.rectangle(frame, (0, 0), (w - 1, h - 1), default_color, 2)
-        cv2.putText(frame, default_label, (12, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 1.2, default_color, 3)
-
         polygons = self.counter.zone_polygons(w, h)
-        if polygons:
-            for label, polygon in polygons:
-                points = np.array([[int(x), int(y)] for x, y in polygon], dtype=np.int32)
-                color = self._zone_color(label)
-                overlay = frame.copy()
-                cv2.fillPoly(overlay, [points], color)
-                cv2.addWeighted(overlay, 0.18, frame, 0.82, 0, frame)
-                cv2.polylines(frame, [points], True, color, 3)
-                x, y, box_w, box_h = cv2.boundingRect(points)
-                cv2.putText(frame, label, (x + box_w - 36, y + 42), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
-            return
+        if not any(label == default_label for label, _ in polygons):
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 0), (w, h), default_color, -1)
+            cv2.addWeighted(overlay, 0.08, frame, 0.92, 0, frame)
+            cv2.rectangle(frame, (0, 0), (w - 1, h - 1), default_color, 2)
+            cv2.putText(frame, default_label, (12, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 1.2, default_color, 3)
+
+        for label, polygon in polygons:
+            points = np.array([[int(x), int(y)] for x, y in polygon], dtype=np.int32)
+            color = self._zone_color(label)
+            overlay = frame.copy()
+            cv2.fillPoly(overlay, [points], color)
+            cv2.addWeighted(overlay, 0.18, frame, 0.82, 0, frame)
+            cv2.polylines(frame, [points], True, color, 3)
+            x, y, box_w, box_h = cv2.boundingRect(points)
+            cv2.putText(frame, label, (x + box_w - 36, y + 42), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
 
     def _zone_color(self, label):
         if label == "A":
