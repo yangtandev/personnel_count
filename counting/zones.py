@@ -12,6 +12,14 @@ class CountEvent:
     status: str
 
 
+@dataclass
+class _Track:
+    anchor_zone: str
+    point: tuple
+    last_seen_at: float
+    cooldown_until: float = 0.0
+
+
 class ZoneCounter:
     def __init__(self, camera_name, config):
         self.camera_name = camera_name
@@ -22,9 +30,8 @@ class ZoneCounter:
         self.lost_timeout_sec = float(counter_cfg.get("lost_timeout_sec", 2.0))
         self.cooldown_sec = float(counter_cfg.get("event_cooldown_sec", 1.5))
         self.zone_point_y_ratio = float(self.zones.get("zone_point_y_ratio", 0.35))
-        self.anchor_zone = None
-        self.last_seen_at = None
-        self.cooldown_until = 0.0
+        self.tracks = {}
+        self.next_track_id = 1
         self.status = "waiting"
 
     def zone_layout(self):
@@ -82,75 +89,112 @@ class ZoneCounter:
         return polygon
 
     def reset(self, status="waiting"):
-        self.anchor_zone = None
-        self.last_seen_at = None
+        self.tracks.clear()
+        self.next_track_id = 1
         self.status = status
 
     def update(self, detections, frame_shape, now, current_count):
         height, width = frame_shape[:2]
         min_area = width * height * self.min_area_ratio
-        people = [det for det in detections if det.area >= min_area]
+        people = []
+        candidate_data = []
+        for det in detections:
+            if det.area < min_area:
+                continue
+            point = self.detection_point(det)
+            zone = self.zone_for_point(point[0], point[1], width, height)
+            if zone is None:
+                continue
+            people.append(det)
+            candidate_data.append((det, zone, point))
 
-        if len(people) > 1:
-            self.reset("paused_multi_person")
-            return None, self.status, people
-
-        if not people:
-            if self.last_seen_at is not None and now - self.last_seen_at > self.lost_timeout_sec:
-                self.reset("incomplete_path")
+        had_tracks = bool(self.tracks)
+        self._drop_lost_tracks(now)
+        if not candidate_data:
+            if had_tracks and not self.tracks:
+                self.status = "incomplete_path"
             else:
-                self.status = "waiting" if self.anchor_zone is None else "tracking"
-            return None, self.status, people
+                self.status = "tracking" if self.tracks else "waiting"
+            return [], self.status, people
 
-        person = people[0]
-        self.last_seen_at = now
-        point_x, point_y = self.detection_point(person)
-        zone = self.zone_for_point(point_x, point_y, width, height)
+        events = []
+        count = current_count
+        unmatched_track_ids = set(self.tracks)
+        max_match_distance = max(width, height) * 0.5
 
-        if zone is None:
-            self.status = "outside_zones" if self.anchor_zone is None else "tracking"
-            return None, self.status, people
+        for person, zone, point in sorted(candidate_data, key=lambda item: item[2][0]):
+            track_id = self._match_track(point, unmatched_track_ids, max_match_distance)
+            if track_id is None:
+                track_id = self.next_track_id
+                self.next_track_id += 1
+                self.tracks[track_id] = _Track(zone, point, now)
+                self.status = f"seen_{zone}"
+                continue
 
-        if now < self.cooldown_until:
-            self.status = "cooldown"
-            return None, self.status, people
+            unmatched_track_ids.discard(track_id)
+            track = self.tracks[track_id]
+            track.last_seen_at = now
+            track.point = point
 
-        if self.anchor_zone is None:
-            self.anchor_zone = zone
-            self.status = f"seen_{zone}"
-            return None, self.status, people
+            if zone == track.anchor_zone:
+                self.status = f"seen_{zone}"
+                continue
 
-        if zone == self.anchor_zone:
-            self.status = f"seen_{zone}"
-            return None, self.status, people
+            if now < track.cooldown_until:
+                self.status = "cooldown"
+                continue
 
-        direction = f"{self.anchor_zone}_to_{zone}"
-        mapped_event = self.direction_map.get(direction)
-        if mapped_event not in {"enter", "exit"}:
-            self.anchor_zone = zone
-            self.status = "unknown_direction"
-            return None, self.status, people
+            direction = f"{track.anchor_zone}_to_{zone}"
+            mapped_event = self.direction_map.get(direction)
+            if mapped_event not in {"enter", "exit"}:
+                track.anchor_zone = zone
+                self.status = "unknown_direction"
+                continue
 
-        before = current_count
-        after = before + (1 if mapped_event == "enter" else -1)
-        status = "ok"
-        if after < 0:
-            after = 0
-            status = "blocked_negative_count"
+            before = count
+            after = before + (1 if mapped_event == "enter" else -1)
+            status = "ok"
+            if after < 0:
+                after = 0
+                status = "blocked_negative_count"
 
-        event = CountEvent(
-            camera=self.camera_name,
-            direction=direction,
-            event=mapped_event,
-            count_before=before,
-            count_after=after,
-            confidence=person.conf,
-            status=status,
-        )
-        self.anchor_zone = zone
-        self.cooldown_until = now + self.cooldown_sec
-        self.status = f"counted_{mapped_event}"
-        return event, self.status, people
+            events.append(
+                CountEvent(
+                    camera=self.camera_name,
+                    direction=direction,
+                    event=mapped_event,
+                    count_before=before,
+                    count_after=after,
+                    confidence=person.conf,
+                    status=status,
+                )
+            )
+            count = after
+            track.anchor_zone = zone
+            track.cooldown_until = now + self.cooldown_sec
+            self.status = f"counted_{mapped_event}"
+
+        return events, self.status, people
+
+    def _drop_lost_tracks(self, now):
+        lost = [
+            track_id
+            for track_id, track in self.tracks.items()
+            if now - track.last_seen_at > self.lost_timeout_sec
+        ]
+        for track_id in lost:
+            del self.tracks[track_id]
+
+    def _match_track(self, point, track_ids, max_distance):
+        best_track_id = None
+        best_distance = max_distance * max_distance
+        for track_id in track_ids:
+            track_point = self.tracks[track_id].point
+            distance = (point[0] - track_point[0]) ** 2 + (point[1] - track_point[1]) ** 2
+            if distance <= best_distance:
+                best_track_id = track_id
+                best_distance = distance
+        return best_track_id
 
 
 def _point_in_polygon(x, y, polygon):

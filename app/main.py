@@ -23,9 +23,7 @@ STATUS_TEXT = {
     "camera_waiting": "等待攝影機畫面",
     "detector_error": "偵測異常",
     "waiting": "等待人員通過",
-    "outside_zones": "人員不在 A/B 區",
     "tracking": "追蹤人員移動中",
-    "paused_multi_person": "多人同框，暫停計數",
     "incomplete_path": "路徑未完成，未計數",
     "cooldown": "已計數，等待人員離開",
     "unknown_direction": "方向不明，未計數",
@@ -94,10 +92,10 @@ class CameraWorker(threading.Thread):
                 self.counter.reset()
                 self.reset_generation = reset_generation
 
-            event, status, people = self.counter.update(detections, frame.shape, now, current_count)
-            annotated = self._annotate(frame.copy(), detections, people, status)
+            events, status, people = self.counter.update(detections, frame.shape, now, current_count)
+            annotated = self._annotate(frame.copy(), people)
 
-            if event is not None:
+            for event in events:
                 with self.shared.lock:
                     should_record = reset_generation == self.shared.reset_generation
                     if should_record:
@@ -117,16 +115,15 @@ class CameraWorker(threading.Thread):
         with self.shared.lock:
             self.shared.frames[self.name] = frame
 
-    def _annotate(self, frame, detections, people, status):
+    def _annotate(self, frame, people):
         self._draw_zones(frame)
-        for det in detections:
-            color = (0, 180, 0) if det in people else (80, 80, 80)
+        for det in people:
+            color = (0, 180, 0)
             x1, y1, x2, y2 = det.box
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, f"person {det.conf:.2f}", (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-            if det in people:
-                point_x, point_y = self.counter.detection_point(det)
-                cv2.circle(frame, (int(point_x), int(point_y)), 6, color, -1)
+            point_x, point_y = self.counter.detection_point(det)
+            cv2.circle(frame, (int(point_x), int(point_y)), 6, color, -1)
         return frame
 
     def _draw_zones(self, frame):

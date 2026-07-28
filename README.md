@@ -66,7 +66,8 @@ systemctl --user restart personnel_count.service
 
 - 井上：`A_to_B` 為進，`B_to_A` 為出
 - 井底：`A_to_B` 為進，`B_to_A` 為出
-- 單人完整穿越 A/B 才計數
+- A/B 區內人員完整穿越才計數
 - 中途折返不計數
-- 多人同框暫停計數
+- A/B 區外人員忽略
+- 多人可同時追蹤計數
 - 人員停留數不允許低於 0
