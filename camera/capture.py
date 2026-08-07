@@ -120,6 +120,7 @@ class VideoCapture:
         options = [
             '-rtsp_transport', transport,
             '-allowed_media_types', 'video',
+            '-timeout', self._connect_timeout_us(),
         ]
         if transport == "tcp":
             options.extend(['-rtsp_flags', 'prefer_tcp'])

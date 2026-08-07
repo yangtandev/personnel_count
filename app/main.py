@@ -2,6 +2,7 @@ import signal
 import sys
 import threading
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -63,6 +64,11 @@ class CameraWorker(threading.Thread):
         self.counter = ZoneCounter(name, config)
         self.stop_event = threading.Event()
         self.reset_generation = shared.reset_generation
+        self.counter_lock = threading.Lock()
+
+    def reload_config(self, config):
+        with self.counter_lock:
+            self.counter = ZoneCounter(self.name, config)
 
     def stop(self):
         self.stop_event.set()
@@ -88,12 +94,13 @@ class CameraWorker(threading.Thread):
             with self.shared.lock:
                 current_count = self.shared.count
                 reset_generation = self.shared.reset_generation
-            if reset_generation != self.reset_generation:
-                self.counter.reset()
-                self.reset_generation = reset_generation
+            with self.counter_lock:
+                if reset_generation != self.reset_generation:
+                    self.counter.reset()
+                    self.reset_generation = reset_generation
 
-            events, status, people = self.counter.update(detections, frame.shape, now, current_count)
-            annotated = self._annotate(frame.copy(), people)
+                events, status, people = self.counter.update(detections, frame.shape, now, current_count)
+                annotated = self._annotate(frame.copy(), people)
 
             for event in events:
                 with self.shared.lock:
@@ -192,6 +199,8 @@ class CameraWorker(threading.Thread):
 
 class PersonnelCountApp:
     def __init__(self, config_path):
+        self.config_path = Path(config_path)
+        self.config_mtime = self.config_path.stat().st_mtime
         self.config = load_config(config_path)
         self.recorder = Recorder(self.config)
         self.detector = PersonDetector(self.config)
@@ -242,6 +251,7 @@ class PersonnelCountApp:
         return result
 
     def _refresh(self, window):
+        self._reload_config_if_changed()
         with self.shared.lock:
             count = self.shared.count
             frames = dict(self.shared.frames)
@@ -256,6 +266,26 @@ class PersonnelCountApp:
     def reset_count(self):
         self.shared.reset_count()
         self.recorder.record_reset(0)
+
+    def _reload_config_if_changed(self):
+        try:
+            mtime = self.config_path.stat().st_mtime
+        except OSError as exc:
+            self.recorder.record_status(f"config_reload_error: {exc}")
+            return
+        if mtime == self.config_mtime:
+            return
+        try:
+            config = load_config(self.config_path)
+            for worker in self.workers:
+                worker.reload_config(config)
+            self.config = config
+            self.config_mtime = mtime
+            self.recorder.record_status("config_reloaded")
+            print(f"Reloaded config from {self.config_path}")
+        except Exception as exc:
+            self.recorder.record_status(f"config_reload_error: {exc}")
+            print(f"Config reload failed: {exc}")
 
 
 def run(config_path):
