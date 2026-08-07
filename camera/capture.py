@@ -104,6 +104,29 @@ class VideoCapture:
         except (TypeError, ValueError):
             return 2.0
 
+    def _frame_timeout(self):
+        try:
+            return max(3.0, float(self.config.get("camera_frame_timeout_sec", 10)))
+        except (TypeError, ValueError):
+            return 10.0
+
+    def _start_frame_watchdog(self, proc, last_frame_at, pipeline_type):
+        timeout = self._frame_timeout()
+
+        def watch():
+            while not self.stop_threads and self.proc is proc and proc.poll() is None:
+                if time.monotonic() - last_frame_at[0] > timeout:
+                    print(f"{pipeline_type}: No frame for {timeout:g} seconds. Restarting FFmpeg.")
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    return
+                time.sleep(min(1.0, timeout / 2))
+
+        thread = threading.Thread(target=watch, daemon=True)
+        thread.start()
+
     def _rtsp_input_options(self):
         return self._rtsp_input_options_for(self._current_rtsp_transport)
 
@@ -216,6 +239,8 @@ class VideoCapture:
         
         frame_size = self.width * self.height * 3
         print(f"{pipeline_type}: FFmpeg process started. Reading {frame_size} byte raw frames ({self.width}x{self.height}).")
+        last_frame_at = [time.monotonic()]
+        self._start_frame_watchdog(self.proc, last_frame_at, pipeline_type)
 
         while not self.stop_threads:
             in_bytes = self.proc.stdout.read(frame_size)
@@ -228,6 +253,7 @@ class VideoCapture:
 
             frame = np.frombuffer(in_bytes, dtype=np.uint8).reshape((self.height, self.width, 3))
             if frame is not None:
+                last_frame_at[0] = time.monotonic()
                 if self.q.full(): self.q.get_nowait()
                 self.q.put(frame)
         
@@ -244,6 +270,8 @@ class VideoCapture:
             '-f', 'image2pipe', '-c:v', 'mjpeg', '-q:v', '2', '-'
         ]
         self.proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, preexec_fn=_ignore_sigint)
+        last_frame_at = [time.monotonic()]
+        self._start_frame_watchdog(self.proc, last_frame_at, "Software MJPEG")
         
         image_buffer = bytearray()
         while not self.stop_threads:
@@ -258,6 +286,7 @@ class VideoCapture:
                 frame = cv2.imdecode(np.frombuffer(image_buffer[a:b+2], dtype=np.uint8), cv2.IMREAD_COLOR)
                 image_buffer = image_buffer[b+2:]
                 if frame is not None:
+                    last_frame_at[0] = time.monotonic()
                     if self.q.full(): self.q.get_nowait()
                     self.q.put(frame)
         return True # Loop exited because of stop_threads

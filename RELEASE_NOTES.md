@@ -1,5 +1,10 @@
 # Release Notes
 
+## v1.7.1 - 2026-08-07
+
+- 新增影格 watchdog，當 RTSP 串流沒有新畫面但 FFmpeg 未結束時會主動重啟連線。
+- 新安裝設定加入 camera frame timeout 預設值。
+
 ## v1.7.0 - 2026-08-07
 
 - 新增 config 熱更新，重新校正 A/B 管制區後不需重啟 RTSP 串流即可套用。
