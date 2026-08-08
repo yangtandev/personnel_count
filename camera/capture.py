@@ -147,6 +147,20 @@ class VideoCapture:
             self.latest_frame = frame
             self.latest_frame_ready.notify()
 
+    def _drain_raw_frames(self, proc, frame_size, last_frame_at, pipeline_type):
+        while not self.stop_threads and self.proc is proc:
+            in_bytes = proc.stdout.read(frame_size)
+            if not in_bytes:
+                print(f"{pipeline_type}: FFmpeg stdout pipe closed unexpectedly.")
+                return
+            if len(in_bytes) != frame_size:
+                print(f"{pipeline_type}: Warning: Incomplete frame (expected {frame_size}, got {len(in_bytes)}). Dropping.")
+                continue
+
+            frame = np.frombuffer(in_bytes, dtype=np.uint8).reshape((self.height, self.width, 3))
+            last_frame_at[0] = time.monotonic()
+            self._publish_latest_frame(frame)
+
     def _rtsp_input_options_for(self, transport):
         options = [
             '-rtsp_transport', transport,
@@ -249,22 +263,16 @@ class VideoCapture:
         print(f"{pipeline_type}: FFmpeg process started. Reading {frame_size} byte raw frames ({self.width}x{self.height}).")
         last_frame_at = [time.monotonic()]
         self._start_frame_watchdog(self.proc, last_frame_at, pipeline_type)
+        drain_thread = threading.Thread(
+            target=self._drain_raw_frames,
+            args=(self.proc, frame_size, last_frame_at, pipeline_type),
+            daemon=True,
+        )
+        drain_thread.start()
+        while not self.stop_threads and self.proc.poll() is None and drain_thread.is_alive():
+            time.sleep(0.1)
 
-        while not self.stop_threads:
-            in_bytes = self.proc.stdout.read(frame_size)
-            if not in_bytes:
-                print(f"{pipeline_type}: FFmpeg stdout pipe closed unexpectedly.")
-                return False
-            if len(in_bytes) != frame_size:
-                print(f"{pipeline_type}: Warning: Incomplete frame (expected {frame_size}, got {len(in_bytes)}). Dropping.")
-                continue
-
-            frame = np.frombuffer(in_bytes, dtype=np.uint8).reshape((self.height, self.width, 3))
-            if frame is not None:
-                last_frame_at[0] = time.monotonic()
-                self._publish_latest_frame(frame)
-        
-        return True # Loop exited because of stop_threads
+        return True # Loop exited because capture stopped or FFmpeg ended.
 
     def _start_sw_mjpeg_pipeline(self):
         """Starts the robust but slower MJPEG software pipeline."""
