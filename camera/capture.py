@@ -130,6 +130,9 @@ class VideoCapture:
     def _rtsp_input_options(self):
         return self._rtsp_input_options_for(self._current_rtsp_transport)
 
+    def _is_rtsp_stream(self):
+        return urlparse(self.rtsp_url).scheme.lower() == "rtsp"
+
     def _rtsp_transports(self):
         value = self.config.get("rtsp_transport", ["tcp", "udp"])
         if isinstance(value, str):
@@ -314,8 +317,9 @@ class VideoCapture:
                         print(f"Error-tolerant raw pipeline failed: {e}.")
                         pipeline_success = False
 
-                # 3. If all above failed, fall back to robust Software MJPEG Pipeline
-                if not pipeline_success and not self.stop_threads:
+                # 3. If all above failed, fall back to robust Software MJPEG Pipeline.
+                # For live RTSP, reconnect raw instead; MJPEG transcode can build large latency.
+                if not pipeline_success and not self.stop_threads and not self._is_rtsp_stream():
                     print("Trying software MJPEG pipeline (final fallback)...")
                     pipeline_success = self._start_sw_mjpeg_pipeline()
 

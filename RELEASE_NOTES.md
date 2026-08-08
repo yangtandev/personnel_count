@@ -1,5 +1,10 @@
 # Release Notes
 
+## v1.7.2 - 2026-08-08
+
+- RTSP raw 串流中斷時直接重連，不再退到 MJPEG 轉碼管線。
+- 避免 MJPEG fallback 導致即時影像延遲累積。
+
 ## v1.7.1 - 2026-08-07
 
 - 新增影格 watchdog，當 RTSP 串流沒有新畫面但 FFmpeg 未結束時會主動重啟連線。
