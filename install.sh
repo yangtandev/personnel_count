@@ -71,6 +71,8 @@ config = {
         "camera_frame_timeout_sec": 10,
         "camera_reconnect_delay_sec": 2,
         "ffprobe_timeout": 5,
+        "camera_output_width": 1280,
+        "camera_output_height": 720,
         "rtsp_transport": ["tcp"],
     },
     "model": {

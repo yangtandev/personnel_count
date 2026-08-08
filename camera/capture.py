@@ -85,6 +85,8 @@ class VideoCapture:
         self.width = None
         self.height = None
         self.codec_name = None
+        self.source_width = None
+        self.source_height = None
         self._current_rtsp_transport = self._rtsp_transports()[0]
         
         self.thread = threading.Thread(target=self._reader_manager)
@@ -109,6 +111,16 @@ class VideoCapture:
             return max(3.0, float(self.config.get("camera_frame_timeout_sec", 10)))
         except (TypeError, ValueError):
             return 10.0
+
+    def _output_size(self, source_width, source_height):
+        try:
+            width = int(self.config.get("camera_output_width") or 0)
+            height = int(self.config.get("camera_output_height") or 0)
+        except (TypeError, ValueError):
+            width, height = 0, 0
+        if width > 0 and height > 0:
+            return width, height
+        return source_width, source_height
 
     def _start_frame_watchdog(self, proc, last_frame_at, pipeline_type):
         timeout = self._frame_timeout()
@@ -189,12 +201,21 @@ class VideoCapture:
                 )
             output = result.stdout.strip()
             stream = json.loads(output)["streams"][0]
-            self.width, self.height = int(stream["width"]), int(stream["height"])
+            self.source_width, self.source_height = int(stream["width"]), int(stream["height"])
+            self.width, self.height = self._output_size(self.source_width, self.source_height)
             self.codec_name = stream.get("codec_name")
-            if self.width <= 0 or self.height <= 0:
-                raise ValueError(f"invalid stream size {self.width}x{self.height}")
+            if self.source_width <= 0 or self.source_height <= 0 or self.width <= 0 or self.height <= 0:
+                raise ValueError(f"invalid stream size {self.source_width}x{self.source_height} -> {self.width}x{self.height}")
+            if self.source_width * self.height != self.source_height * self.width:
+                print(
+                    f"Raw Pipeline: Warning: output aspect ratio differs from source "
+                    f"({self.source_width}x{self.source_height} -> {self.width}x{self.height})."
+                )
             self._current_rtsp_transport = transport
-            print(f"Raw Pipeline: Detected {self.codec_name or 'video'} {self.width}x{self.height} via {transport.upper()}.")
+            print(
+                f"Raw Pipeline: Detected {self.codec_name or 'video'} "
+                f"{self.source_width}x{self.source_height} via {transport.upper()}, output {self.width}x{self.height}."
+            )
             return True
         except subprocess.CalledProcessError as e:
             output = _safe_output(e.output.strip(), self.rtsp_url) if e.output else e
@@ -252,6 +273,7 @@ class VideoCapture:
             
         command.extend([
             '-i', self.rtsp_url,
+            '-vf', f'scale={self.width}:{self.height}',
             '-f', 'rawvideo',
             '-pix_fmt', 'bgr24',
             '-'
