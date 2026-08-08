@@ -1,5 +1,4 @@
 import json
-import queue
 import subprocess
 import threading
 import time
@@ -74,7 +73,8 @@ class VideoCapture:
     """
     def __init__(self, rtsp_url, config_data=None):
         self.rtsp_url = rtsp_url
-        self.q = queue.Queue(maxsize=2)
+        self.latest_frame = None
+        self.latest_frame_ready = threading.Condition()
         self.stop_threads = False
         self.proc = None
         self.config = config_data or {}
@@ -134,13 +134,18 @@ class VideoCapture:
         return urlparse(self.rtsp_url).scheme.lower() == "rtsp"
 
     def _rtsp_transports(self):
-        value = self.config.get("rtsp_transport", ["tcp", "udp"])
+        value = self.config.get("rtsp_transport", ["tcp"])
         if isinstance(value, str):
             transports = [item.strip().lower() for item in value.replace("+", ",").split(",")]
         else:
             transports = [str(item).strip().lower() for item in value]
         transports = [item for item in transports if item in {"tcp", "udp"}]
-        return transports or ["tcp", "udp"]
+        return transports or ["tcp"]
+
+    def _publish_latest_frame(self, frame):
+        with self.latest_frame_ready:
+            self.latest_frame = frame
+            self.latest_frame_ready.notify()
 
     def _rtsp_input_options_for(self, transport):
         options = [
@@ -257,8 +262,7 @@ class VideoCapture:
             frame = np.frombuffer(in_bytes, dtype=np.uint8).reshape((self.height, self.width, 3))
             if frame is not None:
                 last_frame_at[0] = time.monotonic()
-                if self.q.full(): self.q.get_nowait()
-                self.q.put(frame)
+                self._publish_latest_frame(frame)
         
         return True # Loop exited because of stop_threads
 
@@ -290,8 +294,7 @@ class VideoCapture:
                 image_buffer = image_buffer[b+2:]
                 if frame is not None:
                     last_frame_at[0] = time.monotonic()
-                    if self.q.full(): self.q.get_nowait()
-                    self.q.put(frame)
+                    self._publish_latest_frame(frame)
         return True # Loop exited because of stop_threads
 
     def _reader_manager(self):
@@ -344,11 +347,17 @@ class VideoCapture:
                 time.sleep(delay)
 
     def read(self):
-        """Retrieves the latest frame from the queue."""
-        try:
-            return self.q.get(timeout=2)
-        except queue.Empty:
-            return None
+        """Retrieves the newest frame and drops anything older."""
+        deadline = time.monotonic() + 2
+        with self.latest_frame_ready:
+            while self.latest_frame is None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self.latest_frame_ready.wait(remaining)
+            frame = self.latest_frame
+            self.latest_frame = None
+            return frame
 
     def terminate(self):
         """Stops the reader thread and terminates the FFmpeg subprocess gracefully."""

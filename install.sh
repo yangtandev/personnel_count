@@ -71,6 +71,7 @@ config = {
         "camera_frame_timeout_sec": 10,
         "camera_reconnect_delay_sec": 2,
         "ffprobe_timeout": 5,
+        "rtsp_transport": ["tcp"],
     },
     "model": {
         "path": "models/int8/best_cloth2_openvino_model",
