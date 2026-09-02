@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 # --- Hardware Acceleration Auto-Detection ---
 
 _best_decoder_info = {'name': 'cpu', 'checked': False}
+_BAD_FRAME_LOG_INTERVAL_SEC = 5.0
 
 def get_best_hw_accel():
     """
@@ -64,6 +65,37 @@ def _safe_url(url):
 def _safe_output(text, url):
     return str(text).replace(url, _safe_url(url))
 
+
+def frame_quality_issue(frame):
+    """Returns a rejection reason for obvious decoder-artifact frames."""
+    if frame is None or frame.ndim != 3 or frame.shape[2] != 3 or frame.size == 0:
+        return "invalid"
+
+    sample = frame
+    height, width = frame.shape[:2]
+    if width > 640:
+        scale = 640 / width
+        sample = cv2.resize(frame, (640, max(1, int(height * scale))), interpolation=cv2.INTER_AREA)
+
+    hsv = cv2.cvtColor(sample, cv2.COLOR_BGR2HSV)
+    b, g, r = cv2.split(sample)
+    saturation = hsv[:, :, 1]
+    value = hsv[:, :, 2]
+    channel_spread = np.maximum.reduce([b, g, r]) - np.minimum.reduce([b, g, r])
+
+    green_pixels = (g > 90) & (g > r * 1.35) & (g > b * 1.35)
+    green_ratio = float(green_pixels.mean())
+    if green_ratio > 0.70:
+        return f"green_screen green_ratio={green_ratio:.3f}"
+
+    artifact_pixels = (saturation > 115) & (value > 115) & (channel_spread > 80)
+    artifact_ratio = float(artifact_pixels.mean())
+    bad_row_ratio = float((artifact_pixels.mean(axis=1) > 0.35).mean())
+    if artifact_ratio > 0.12 and bad_row_ratio > 0.08:
+        return f"decode_artifacts artifact_ratio={artifact_ratio:.3f} bad_row_ratio={bad_row_ratio:.3f}"
+
+    return None
+
 # --- VideoCapture Class ---
 
 class VideoCapture:
@@ -88,6 +120,7 @@ class VideoCapture:
         self.source_width = None
         self.source_height = None
         self._current_rtsp_transport = self._rtsp_transports()[0]
+        self._last_bad_frame_log_at = 0.0
         
         self.thread = threading.Thread(target=self._reader_manager)
         self.thread.daemon = True
@@ -155,9 +188,17 @@ class VideoCapture:
         return transports or ["tcp"]
 
     def _publish_latest_frame(self, frame):
+        issue = frame_quality_issue(frame)
+        if issue:
+            now = time.monotonic()
+            if now - self._last_bad_frame_log_at >= _BAD_FRAME_LOG_INTERVAL_SEC:
+                print(f"Dropping bad frame from {_safe_url(self.rtsp_url)}: {issue}.")
+                self._last_bad_frame_log_at = now
+            return False
         with self.latest_frame_ready:
             self.latest_frame = frame
             self.latest_frame_ready.notify()
+        return True
 
     def _drain_raw_frames(self, proc, frame_size, last_frame_at, pipeline_type):
         while not self.stop_threads and self.proc is proc:
@@ -170,8 +211,8 @@ class VideoCapture:
                 continue
 
             frame = np.frombuffer(in_bytes, dtype=np.uint8).reshape((self.height, self.width, 3))
-            last_frame_at[0] = time.monotonic()
-            self._publish_latest_frame(frame)
+            if self._publish_latest_frame(frame):
+                last_frame_at[0] = time.monotonic()
 
     def _rtsp_input_options_for(self, transport):
         options = [
@@ -322,9 +363,8 @@ class VideoCapture:
             if a != -1 and b != -1 and b > a:
                 frame = cv2.imdecode(np.frombuffer(image_buffer[a:b+2], dtype=np.uint8), cv2.IMREAD_COLOR)
                 image_buffer = image_buffer[b+2:]
-                if frame is not None:
+                if frame is not None and self._publish_latest_frame(frame):
                     last_frame_at[0] = time.monotonic()
-                    self._publish_latest_frame(frame)
         return True # Loop exited because of stop_threads
 
     def _reader_manager(self):
