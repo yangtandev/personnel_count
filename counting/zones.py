@@ -18,6 +18,9 @@ class _Track:
     point: tuple
     last_seen_at: float
     cooldown_until: float = 0.0
+    counted: bool = False
+    ignored_reverse_zone: str = None
+    ignored_reverse_since: float = 0.0
 
 
 class ZoneCounter:
@@ -29,9 +32,17 @@ class ZoneCounter:
         self.min_area_ratio = float(counter_cfg.get("min_person_area_ratio", 0.02))
         self.lost_timeout_sec = float(counter_cfg.get("lost_timeout_sec", 2.0))
         self.cooldown_sec = float(counter_cfg.get("event_cooldown_sec", 1.5))
-        self.zone_point_y_ratio = float(self.zones.get("zone_point_y_ratio", 0.35))
+        self.one_event_per_track = bool(counter_cfg.get("one_event_per_track", False))
+        self.flow_direction_lock = bool(counter_cfg.get("flow_direction_lock", False))
+        self.reverse_anchor_sec = float(counter_cfg.get("reverse_anchor_sec", 0.5))
+        ratio_cfg = self.zones.get("zone_point_y_ratio", 0.05)
+        if isinstance(ratio_cfg, dict):
+            ratio_cfg = ratio_cfg.get(self.camera_name, ratio_cfg.get("default", 0.05))
+        self.zone_point_y_ratio = float(ratio_cfg)
+        self.use_detection_point = bool(self.zones.get("use_detection_point", False))
         self.tracks = {}
         self.next_track_id = 1
+        self.flow_direction = None
         self.status = "waiting"
 
     def zone_layout(self):
@@ -56,6 +67,8 @@ class ZoneCounter:
         return polygons
 
     def detection_point(self, detection):
+        if self.use_detection_point and getattr(detection, "point", None) is not None:
+            return detection.point
         x1, y1, x2, y2 = detection.box
         return (
             (x1 + x2) / 2,
@@ -91,6 +104,7 @@ class ZoneCounter:
     def reset(self, status="waiting"):
         self.tracks.clear()
         self.next_track_id = 1
+        self.flow_direction = None
         self.status = status
 
     def update(self, detections, frame_shape, now, current_count):
@@ -103,13 +117,14 @@ class ZoneCounter:
                 continue
             point = self.detection_point(det)
             zone = self.zone_for_point(point[0], point[1], width, height)
-            if zone is None:
-                continue
-            people.append(det)
+            if zone is not None:
+                people.append(det)
             candidate_data.append((det, zone, point))
 
         had_tracks = bool(self.tracks)
         self._drop_lost_tracks(now)
+        if not self.tracks:
+            self.flow_direction = None
         if not candidate_data:
             if had_tracks and not self.tracks:
                 self.status = "incomplete_path"
@@ -123,10 +138,13 @@ class ZoneCounter:
         max_match_distance = max(width, height) * 0.5
 
         for person, zone, point in sorted(candidate_data, key=lambda item: item[2][0]):
-            track_id = self._match_track(point, unmatched_track_ids, max_match_distance)
-            if track_id is None:
-                track_id = self.next_track_id
-                self.next_track_id += 1
+            track_id = self._track_id_for(person, point, unmatched_track_ids, max_match_distance)
+            if track_id is None or track_id not in self.tracks:
+                if zone is None:
+                    continue
+                if track_id is None:
+                    track_id = self.next_track_id
+                    self.next_track_id += 1
                 self.tracks[track_id] = _Track(zone, point, now)
                 self.status = f"seen_{zone}"
                 continue
@@ -135,9 +153,17 @@ class ZoneCounter:
             track = self.tracks[track_id]
             track.last_seen_at = now
             track.point = point
+            if zone is None:
+                self.status = "tracking"
+                continue
 
             if zone == track.anchor_zone:
+                track.ignored_reverse_zone = None
                 self.status = f"seen_{zone}"
+                continue
+
+            if self.one_event_per_track and track.counted:
+                self.status = "counted_track"
                 continue
 
             if now < track.cooldown_until:
@@ -149,6 +175,16 @@ class ZoneCounter:
             if mapped_event not in {"enter", "exit"}:
                 track.anchor_zone = zone
                 self.status = "unknown_direction"
+                continue
+
+            if self.flow_direction_lock and self.flow_direction and direction != self.flow_direction:
+                if track.ignored_reverse_zone != zone:
+                    track.ignored_reverse_zone = zone
+                    track.ignored_reverse_since = now
+                elif now - track.ignored_reverse_since >= self.reverse_anchor_sec:
+                    track.anchor_zone = zone
+                    track.ignored_reverse_zone = None
+                self.status = "flow_reverse_ignored"
                 continue
 
             before = count
@@ -172,9 +208,17 @@ class ZoneCounter:
             count = after
             track.anchor_zone = zone
             track.cooldown_until = now + self.cooldown_sec
+            track.counted = True
+            self.flow_direction = direction
             self.status = f"counted_{mapped_event}"
 
         return events, self.status, people
+
+    def _track_id_for(self, detection, point, unmatched_track_ids, max_match_distance):
+        external_id = getattr(detection, "track_id", None)
+        if external_id is not None:
+            return f"det:{external_id}"
+        return self._match_track(point, unmatched_track_ids, max_match_distance)
 
     def _drop_lost_tracks(self, now):
         lost = [

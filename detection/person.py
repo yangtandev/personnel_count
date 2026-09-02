@@ -5,6 +5,11 @@ import threading
 import cv2
 from ultralytics import YOLOv10
 
+try:
+    import mediapipe as mp
+except ImportError:
+    mp = None
+
 from config.loader import project_path
 
 
@@ -13,6 +18,10 @@ class Detection:
     box: tuple
     conf: float
     cls: int
+    track_id: int = None
+    point: tuple = None
+    point_source: str = "person"
+    head_box: tuple = None
 
     @property
     def center_x(self):
@@ -34,17 +43,67 @@ class PersonDetector:
         self.model = YOLOv10(model_path, task="detect")
         self.person_class_id = int(model_cfg.get("person_class_id", 1))
         self.min_conf = float(model_cfg.get("min_conf", 0.35))
+        self.track_conf = float(model_cfg.get("track_conf", 0.25))
         self.iou = float(model_cfg.get("iou", 0.45))
         self.duplicate_iou = float(model_cfg.get("duplicate_iou", 0.75))
         self.inference_width = int(model_cfg.get("inference_width", 960) or 0)
+        self.use_tracking = bool(model_cfg.get("use_tracking", True))
+        self.tracker = model_cfg.get("tracker", "botsort.yaml")
+        self.head_class_ids = {int(cls) for cls in model_cfg.get("head_class_ids", [2])}
+        self.detect_class_ids = sorted({self.person_class_id, *self.head_class_ids})
+        self.use_face_detection = bool(model_cfg.get("use_face_detection", True))
         self.lock = threading.Lock()
+        self.tracking_failed = False
+        self.face_detector = None
+        self.face_mesh = None
+        if mp is not None and self.use_face_detection:
+            self.face_detector = mp.solutions.face_detection.FaceDetection(
+                model_selection=1,
+                min_detection_confidence=float(model_cfg.get("face_min_conf", 0.35)),
+            )
+            self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+                static_image_mode=False,
+                max_num_faces=int(model_cfg.get("max_faces", 5)),
+                refine_landmarks=True,
+                min_detection_confidence=float(model_cfg.get("face_min_conf", 0.35)),
+                min_tracking_confidence=0.5,
+            )
 
     def detect(self, frame):
         input_frame, scale_x, scale_y = self._prepare_frame(frame)
         with self.lock:
-            result = self.model(source=input_frame, conf=self.min_conf, iou=self.iou, verbose=False)[0]
+            if self.use_tracking and not self.tracking_failed:
+                try:
+                    result = self.model.track(
+                        source=input_frame,
+                        persist=True,
+                        classes=self.detect_class_ids,
+                        conf=self.track_conf,
+                        iou=self.iou,
+                        tracker=self.tracker,
+                        verbose=False,
+                    )[0]
+                except ModuleNotFoundError:
+                    self.tracking_failed = True
+                    result = self.model(
+                        source=input_frame,
+                        classes=self.detect_class_ids,
+                        conf=self.min_conf,
+                        iou=self.iou,
+                        verbose=False,
+                    )[0]
+            else:
+                result = self.model(
+                    source=input_frame,
+                    classes=self.detect_class_ids,
+                    conf=self.min_conf,
+                    iou=self.iou,
+                    verbose=False,
+                )[0]
+        head_boxes = self._head_boxes(result, input_frame, scale_x, scale_y)
         detections = []
-        for det in result.boxes:
+        track_ids = [] if result.boxes.id is None else result.boxes.id.cpu().numpy().astype(int).tolist()
+        for index, det in enumerate(result.boxes):
             cls_id = int(det.cls)
             if cls_id != self.person_class_id:
                 continue
@@ -56,8 +115,86 @@ class PersonDetector:
                 int(round(x2 * scale_x)),
                 int(round(y2 * scale_y)),
             )
-            detections.append(Detection(box, conf, cls_id))
+            track_id = track_ids[index] if index < len(track_ids) else None
+            head = _best_head_for_person(head_boxes, box)
+            point_source = head["source"] if head else "person"
+            point = _box_center(head["box"]) if head else None
+            head_box = head["box"] if head else None
+            detections.append(Detection(box, conf, cls_id, track_id, point, point_source, head_box))
         return self._remove_duplicate_people(detections)
+
+    def close(self):
+        if self.face_detector is not None:
+            try:
+                self.face_detector.close()
+            except ValueError:
+                pass
+            self.face_detector = None
+        if self.face_mesh is not None:
+            try:
+                self.face_mesh.close()
+            except ValueError:
+                pass
+            self.face_mesh = None
+
+    def _head_boxes(self, result, frame, scale_x, scale_y):
+        boxes = []
+        for det in result.boxes:
+            if int(det.cls) not in self.head_class_ids:
+                continue
+            x1, y1, x2, y2 = det.xyxy[0].cpu().numpy().astype(int)
+            boxes.append(
+                {
+                    "box": (
+                        int(round(x1 * scale_x)),
+                        int(round(y1 * scale_y)),
+                        int(round(x2 * scale_x)),
+                        int(round(y2 * scale_y)),
+                    ),
+                    "conf": float(det.conf[0]),
+                    "source": "head",
+                }
+            )
+
+        if self.face_detector is None and self.face_mesh is None:
+            return boxes
+
+        h, w = frame.shape[:2]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        if self.face_detector is not None:
+            face_result = self.face_detector.process(rgb)
+            if face_result.detections:
+                for det in face_result.detections:
+                    rel = det.location_data.relative_bounding_box
+                    x1 = rel.xmin * w
+                    y1 = rel.ymin * h
+                    x2 = x1 + rel.width * w
+                    y2 = y1 + rel.height * h
+                    boxes.append(
+                        {
+                            "box": _scale_box(_clamp_box((x1, y1, x2, y2), w, h), scale_x, scale_y),
+                            "conf": float(det.score[0]),
+                            "source": "face",
+                        }
+                    )
+        if self.face_mesh is not None:
+            mesh_result = self.face_mesh.process(rgb)
+            if mesh_result.multi_face_landmarks:
+                for landmarks in mesh_result.multi_face_landmarks:
+                    xs = [point.x * w for point in landmarks.landmark]
+                    ys = [point.y * h for point in landmarks.landmark]
+                    x1, x2 = min(xs), max(xs)
+                    y1, y2 = min(ys), max(ys)
+                    bw, bh = x2 - x1, y2 - y1
+                    box = (x1 - bw * 0.2, y1 - bh * 0.35, x2 + bw * 0.2, y2 + bh * 0.1)
+                    boxes.append(
+                        {
+                            "box": _scale_box(_clamp_box(box, w, h), scale_x, scale_y),
+                            "conf": 1.0,
+                            "source": "face",
+                        }
+                    )
+        return boxes
 
     def _remove_duplicate_people(self, detections):
         kept = []
@@ -91,3 +228,51 @@ def _box_iou(a, b):
     area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
     area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
     return intersection / max(1, area_a + area_b - intersection)
+
+
+def _box_center(box):
+    x1, y1, x2, y2 = box
+    return (int(round((x1 + x2) / 2)), int(round((y1 + y2) / 2)))
+
+
+def _clamp_box(box, width, height):
+    x1, y1, x2, y2 = box
+    x1 = max(0, min(width - 1, int(x1)))
+    y1 = max(0, min(height - 1, int(y1)))
+    x2 = min(width, max(x1 + 1, int(x2)))
+    y2 = min(height, max(y1 + 1, int(y2)))
+    return x1, y1, x2, y2
+
+
+def _scale_box(box, scale_x, scale_y):
+    x1, y1, x2, y2 = box
+    return (
+        int(round(x1 * scale_x)),
+        int(round(y1 * scale_y)),
+        int(round(x2 * scale_x)),
+        int(round(y2 * scale_y)),
+    )
+
+
+def _best_head_for_person(heads, person_box):
+    x1, y1, x2, y2 = person_box
+    person_w = max(1, x2 - x1)
+    person_h = max(1, y2 - y1)
+    best = None
+    best_score = -1
+    for head in heads:
+        hx1, hy1, hx2, hy2 = head["box"]
+        head_w = max(1, hx2 - hx1)
+        head_h = max(1, hy2 - hy1)
+        if head["source"] == "face" and (head_w > person_w * 0.75 or head_h > person_h * 0.45):
+            continue
+        cx, cy = _box_center(head["box"])
+        if not (x1 - 20 <= cx <= x2 + 20 and y1 - 10 <= cy <= y1 + (y2 - y1) * 0.55):
+            continue
+        score = head["conf"] + (2.0 if head["source"] == "head" else 0.0)
+        if _box_iou((hx1, hy1, hx2, hy2), person_box) <= 0 and score < 1.0:
+            continue
+        if score > best_score:
+            best = head
+            best_score = score
+    return best

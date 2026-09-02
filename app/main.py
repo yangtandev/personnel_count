@@ -54,11 +54,11 @@ class SharedState:
 
 
 class CameraWorker(threading.Thread):
-    def __init__(self, name, camera_url, config, detector, recorder, shared):
+    def __init__(self, name, camera_url, config, recorder, shared):
         super().__init__(daemon=True)
         self.name = name
         self.capture = VideoCapture(camera_url, config_data={**config.get("camera", {})})
-        self.detector = detector
+        self.detector = PersonDetector(config)
         self.recorder = recorder
         self.shared = shared
         self.counter = ZoneCounter(name, config)
@@ -73,6 +73,9 @@ class CameraWorker(threading.Thread):
     def stop(self):
         self.stop_event.set()
         self.capture.terminate()
+        close = getattr(self.detector, "close", None)
+        if close is not None:
+            close()
 
     def run(self):
         while not self.stop_event.is_set():
@@ -128,9 +131,20 @@ class CameraWorker(threading.Thread):
             color = (0, 180, 0)
             x1, y1, x2, y2 = det.box
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, f"person {det.conf:.2f}", (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            label = f"person {det.conf:.2f}"
+            if getattr(det, "track_id", None) is not None:
+                label = f"id {det.track_id} {label}"
+            cv2.putText(frame, label, (x1, max(20, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            head_box = getattr(det, "head_box", None)
+            if head_box is not None:
+                hx1, hy1, hx2, hy2 = head_box
+                cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), (0, 220, 255), 2)
             point_x, point_y = self.counter.detection_point(det)
-            cv2.circle(frame, (int(point_x), int(point_y)), 6, color, -1)
+            cv2.circle(frame, (int(point_x), int(point_y)), 6, (0, 0, 255), -1)
+            point_source = getattr(det, "point_source", "person")
+            if not getattr(self.counter, "use_detection_point", False):
+                point_source = "person-top"
+            cv2.putText(frame, point_source, (int(point_x) + 8, int(point_y) - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
         return frame
 
     def _draw_zones(self, frame):
@@ -203,16 +217,15 @@ class PersonnelCountApp:
         self.config_mtime = self.config_path.stat().st_mtime
         self.config = load_config(config_path)
         self.recorder = Recorder(self.config)
-        self.detector = PersonDetector(self.config)
         self.shared = SharedState(self.config["counter"].get("initial_count", 0))
         cameras = self.config["camera"]
         self.single_camera = self._same_camera(cameras.get("top"), cameras.get("bottom"))
         self.workers = [
-            CameraWorker("top", cameras["top"], self.config, self.detector, self.recorder, self.shared),
+            CameraWorker("top", cameras["top"], self.config, self.recorder, self.shared),
         ]
         if not self.single_camera:
             self.workers.append(
-                CameraWorker("bottom", cameras["bottom"], self.config, self.detector, self.recorder, self.shared)
+                CameraWorker("bottom", cameras["bottom"], self.config, self.recorder, self.shared)
             )
 
     def _same_camera(self, top_url, bottom_url):
