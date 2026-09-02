@@ -11,6 +11,7 @@ tests/
 venv/
 __pycache__/
 *.pyc
+test_*
 
 # OS / editor
 .DS_Store
