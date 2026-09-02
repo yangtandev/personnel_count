@@ -79,6 +79,7 @@ def frame_quality_issue(frame):
 
     hsv = cv2.cvtColor(sample, cv2.COLOR_BGR2HSV)
     b, g, r = cv2.split(sample)
+    gray = cv2.cvtColor(sample, cv2.COLOR_BGR2GRAY)
     saturation = hsv[:, :, 1]
     value = hsv[:, :, 2]
     channel_spread = np.maximum.reduce([b, g, r]) - np.minimum.reduce([b, g, r])
@@ -89,10 +90,40 @@ def frame_quality_issue(frame):
         return f"green_screen green_ratio={green_ratio:.3f}"
 
     artifact_pixels = (saturation > 115) & (value > 115) & (channel_spread > 80)
+    color_jump = np.zeros(artifact_pixels.shape, dtype=bool)
+    color_jump[:, 1:] |= np.max(np.abs(sample[:, 1:].astype(np.int16) - sample[:, :-1].astype(np.int16)), axis=2) > 50
+    color_jump[1:, :] |= np.max(np.abs(sample[1:].astype(np.int16) - sample[:-1].astype(np.int16)), axis=2) > 50
+    noisy_artifact_pixels = artifact_pixels & color_jump
     artifact_ratio = float(artifact_pixels.mean())
-    bad_row_ratio = float((artifact_pixels.mean(axis=1) > 0.35).mean())
+    bad_row_ratio = float((noisy_artifact_pixels.mean(axis=1) > 0.25).mean())
     if artifact_ratio > 0.12 and bad_row_ratio > 0.08:
         return f"decode_artifacts artifact_ratio={artifact_ratio:.3f} bad_row_ratio={bad_row_ratio:.3f}"
+
+    def edge_score(region):
+        if region.size == 0:
+            return 0.0
+        dx = np.abs(region[:, 1:].astype(np.int16) - region[:, :-1].astype(np.int16))
+        dy = np.abs(region[1:, :].astype(np.int16) - region[:-1, :].astype(np.int16))
+        values = []
+        if dx.size:
+            values.append(float(dx.mean()))
+        if dy.size:
+            values.append(float(dy.mean()))
+        return float(np.mean(values)) if values else 0.0
+
+    full_edge = edge_score(gray)
+    chroma = float(channel_spread.mean())
+    mean_value = float(value.mean())
+    if 15 < mean_value < 240 and float(gray.std()) < 7 and full_edge < 3 and chroma < 12:
+        return f"flat_gray_frame stddev={gray.std():.1f} edge={full_edge:.1f}"
+
+    top = gray[: max(1, gray.shape[0] // 2), :]
+    bottom = gray[int(gray.shape[0] * 0.8) :, :]
+    top_edge = edge_score(top)
+    bottom_edge = edge_score(bottom)
+    bottom_saturation = float(saturation[int(saturation.shape[0] * 0.8) :, :].mean())
+    if top_edge > 8 and bottom_edge < 4 and bottom_edge < top_edge * 0.35 and bottom_saturation < 35:
+        return f"bad_gray_band bottom_edge={bottom_edge:.1f} top_edge={top_edge:.1f}"
 
     return None
 
