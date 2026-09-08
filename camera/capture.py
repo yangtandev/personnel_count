@@ -64,6 +64,53 @@ def _safe_url(url):
 def _safe_output(text, url):
     return str(text).replace(url, _safe_url(url))
 
+
+def frame_quality_issue(frame):
+    """Returns a reason when a decoded frame is visibly unusable."""
+    if not isinstance(frame, np.ndarray) or frame.ndim != 3 or frame.shape[2] < 3:
+        return "invalid_frame"
+
+    height, width = frame.shape[:2]
+    if height < 2 or width < 2:
+        return "invalid_frame"
+
+    # Sparse sampling avoids a resize allocation and keeps this off the inference path.
+    step_y = max(1, height // 45)
+    step_x = max(1, width // 80)
+    sample = frame[::step_y, ::step_x][:45, :80, :3].astype(np.int16)
+    channel_range = sample.max(axis=2) - sample.min(axis=2)
+    green_dominance = sample[:, :, 1] - np.maximum(sample[:, :, 0], sample[:, :, 2])
+
+    if np.mean(green_dominance > 80) >= 0.80:
+        return "green_screen"
+
+    if float(channel_range.mean()) <= 2.0 and float(sample.std()) <= 3.0:
+        return "flat_gray_frame"
+
+    row_difference = float(np.abs(np.diff(sample, axis=0)).mean())
+    band_ranges = [band.mean() for band in np.array_split(channel_range, 5, axis=0)]
+    band_range_std = float(np.std(band_ranges))
+    mean_range = float(channel_range.mean())
+
+    if (
+        (mean_range >= 75.0 and row_difference >= 55.0)
+        or (band_range_std >= 25.0 and row_difference >= 40.0)
+        or (mean_range >= 70.0 and band_range_std >= 80.0)
+    ):
+        return "decode_artifacts"
+
+    bottom = sample[max(1, sample.shape[0] * 4 // 5):]
+    upper = sample[:max(1, sample.shape[0] * 4 // 5)]
+    if (
+        float((bottom.max(axis=2) - bottom.min(axis=2)).mean()) <= 3.0
+        and float(bottom.std()) <= 3.0
+        and float(upper.std()) >= 10.0
+    ):
+        return "bad_gray_band"
+
+    return None
+
+
 # --- VideoCapture Class ---
 
 class VideoCapture:
@@ -75,6 +122,7 @@ class VideoCapture:
         self.rtsp_url = rtsp_url
         self.latest_frame = None
         self.latest_frame_ready = threading.Condition()
+        self._last_bad_frame_log_at = 0.0
         self.stop_threads = False
         self.proc = None
         self.config = config_data or {}
@@ -155,9 +203,18 @@ class VideoCapture:
         return transports or ["tcp"]
 
     def _publish_latest_frame(self, frame):
+        issue = frame_quality_issue(frame)
+        if issue is not None:
+            now = time.monotonic()
+            if now - getattr(self, "_last_bad_frame_log_at", 0.0) >= 5.0:
+                print(f"Frame quality: dropped {issue} from {_safe_url(self.rtsp_url)}.")
+                self._last_bad_frame_log_at = now
+            return False
+
         with self.latest_frame_ready:
             self.latest_frame = frame
             self.latest_frame_ready.notify()
+        return True
 
     def _drain_raw_frames(self, proc, frame_size, last_frame_at, pipeline_type):
         while not self.stop_threads and self.proc is proc:
@@ -170,8 +227,8 @@ class VideoCapture:
                 continue
 
             frame = np.frombuffer(in_bytes, dtype=np.uint8).reshape((self.height, self.width, 3))
-            last_frame_at[0] = time.monotonic()
-            self._publish_latest_frame(frame)
+            if self._publish_latest_frame(frame):
+                last_frame_at[0] = time.monotonic()
 
     def _rtsp_input_options_for(self, transport):
         options = [
@@ -322,9 +379,8 @@ class VideoCapture:
             if a != -1 and b != -1 and b > a:
                 frame = cv2.imdecode(np.frombuffer(image_buffer[a:b+2], dtype=np.uint8), cv2.IMREAD_COLOR)
                 image_buffer = image_buffer[b+2:]
-                if frame is not None:
+                if frame is not None and self._publish_latest_frame(frame):
                     last_frame_at[0] = time.monotonic()
-                    self._publish_latest_frame(frame)
         return True # Loop exited because of stop_threads
 
     def _reader_manager(self):

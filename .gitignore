@@ -6,6 +6,11 @@ config.json
 img_log/
 log/
 tests/
+scratch/
+*.jpg
+*.mp4
+test_*
+tools/
 
 # Python
 venv/
