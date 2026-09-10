@@ -10,7 +10,8 @@ scratch/
 *.jpg
 *.mp4
 test_*
-tools/
+tools/*
+!tools/calibrate_line.py
 
 # Python
 venv/

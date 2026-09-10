@@ -1,6 +1,6 @@
 # 人員停留數系統
 
-雙鏡頭人員停留數計算系統。程式偵測單人穿越畫面中的 A/B 區域，依方向更新人員停留數，並保存偵測截圖與事件紀錄。
+雙鏡頭人員停留數計算系統。程式依每個追蹤 ID 的移動軌跡與跨線方向更新人員停留數，並保存偵測截圖與事件紀錄。
 
 ## 啟動
 
@@ -8,13 +8,13 @@
 python main.py --config config.json
 ```
 
-## 校正 A/B 區
+## 校正計數線
 
-抓一張現場攝影機畫面，手動畫 A/B 區並存回 `config.json`：
+抓一張現場攝影機畫面，指定計數線起點與終點並存回 `config.json`：
 
 ```bash
-python tools/calibrate_zones.py --config config.json --camera top
-python tools/calibrate_zones.py --config config.json --camera bottom
+python tools/calibrate_line.py --config config.json --camera top
+python tools/calibrate_line.py --config config.json --camera bottom
 ```
 
 也可以先用 ffmpeg 截原解析度圖片，再指定圖片校正：
@@ -22,19 +22,18 @@ python tools/calibrate_zones.py --config config.json --camera bottom
 ```bash
 mkdir -p calibration
 ffmpeg -rtsp_transport tcp -i "rtsp://帳號:密碼@IP:PORT/路徑" -frames:v 1 -q:v 2 calibration/top.jpg
-python tools/calibrate_zones.py --config config.json --camera top --image calibration/top.jpg
+python tools/calibrate_line.py --config config.json --camera top --image calibration/top.jpg
 ```
 
 操作：
 
-- 滑鼠左鍵：新增一個點
-- `A` / `B`：切換目前畫的區域
-- 滑鼠右鍵或 `U`：復原目前區域上一個點
-- `R`：清空目前區域
-- `S`：儲存，A/B 都至少 3 點
+- 滑鼠左鍵：依序指定起點、終點
+- 滑鼠右鍵或 `U`：復原上一個點
+- `R`：清空計數線
+- `S`：儲存，必須正好 2 點
 - `Q` 或 `Esc`：取消
 
-儲存後，辨識畫面會顯示手動畫出的 A/B 區。判斷點在 A 區內是 A，在 B 區內是 B；兩區外不觸發 A/B 轉換。判斷點預設在人框上方往下 35%，可用 `zones.zone_point_y_ratio` 調整。
+箭頭起點到終點定義正負側；預設 `positive_to_negative` 為進入。辨識畫面會顯示計數線、追蹤 ID、移動軌跡與判斷點。判斷點預設在人框上方往下 15%，可用 `crossing.point_y_ratio` 調整。
 
 ## 安裝
 
@@ -64,10 +63,10 @@ systemctl --user restart personnel_count.service
 
 ## 計數規則
 
-- 井上：`A_to_B` 為進，`B_to_A` 為出
-- 井底：`A_to_B` 為進，`B_to_A` 為出
-- A/B 區內人員完整穿越才計數
+- 井上：`positive_to_negative` 為進，反向為出
+- 井底：`positive_to_negative` 為進，反向為出
+- 同一追蹤 ID 完整穿越有限長度計數線才計數
 - 中途折返不計數
-- A/B 區外人員忽略
 - 多人可同時追蹤計數
+- 沒有追蹤 ID 時停止計數，不使用鄰近座標猜測
 - 人員停留數不允許低於 0

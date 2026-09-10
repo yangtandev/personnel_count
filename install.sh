@@ -98,14 +98,17 @@ config = {
         "flow_direction_lock": True,
         "reverse_anchor_sec": 0.5,
     },
-    "zones": {
-        "use_detection_point": False,
-        "zone_point_y_ratio": {"top": 0.15, "bottom": 0.15},
-        "regions": {},
+    "crossing": {
+        "point_y_ratio": {"top": 0.15, "bottom": 0.15},
+        "hysteresis_ratio": 0.012,
+        "segment_margin_ratio": 0.05,
+        "min_track_frames": 3,
+        "trail_length": 30,
+        "lines": {},
     },
     "direction": {
-        "top": {"A_to_B": "enter", "B_to_A": "exit"},
-        "bottom": {"B_to_A": "exit", "A_to_B": "enter"},
+        "top": {"positive_to_negative": "enter", "negative_to_positive": "exit"},
+        "bottom": {"positive_to_negative": "enter", "negative_to_positive": "exit"},
     },
     "storage": {
         "img_log_dir": "img_log/personnel_count",

@@ -13,7 +13,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from camera.capture import VideoCapture
 from config.loader import load_config
-from counting.zones import ZoneCounter
+from counting.lines import LineCounter
 from detection.person import PersonDetector
 from storage.recorder import Recorder
 from ui.window import PersonnelCountWindow
@@ -30,8 +30,11 @@ STATUS_TEXT = {
     "unknown_direction": "方向不明，未計數",
     "counted_enter": "已計入進入",
     "counted_exit": "已計入離開",
-    "seen_A": "人員位於 A 區",
-    "seen_B": "人員位於 B 區",
+    "near_line": "人員接近計數線",
+    "crossing_rejected": "未穿越有效線段，不計數",
+    "tracking_unavailable": "追蹤 ID 無法使用，停止計數",
+    "line_not_configured": "尚未設定計數線",
+    "flow_reverse_ignored": "反向事件已由方向鎖忽略",
 }
 
 
@@ -61,14 +64,14 @@ class CameraWorker(threading.Thread):
         self.detector = PersonDetector(config)
         self.recorder = recorder
         self.shared = shared
-        self.counter = ZoneCounter(name, config)
+        self.counter = LineCounter(name, config)
         self.stop_event = threading.Event()
         self.reset_generation = shared.reset_generation
         self.counter_lock = threading.Lock()
 
     def reload_config(self, config):
         with self.counter_lock:
-            self.counter = ZoneCounter(self.name, config)
+            self.counter = LineCounter(self.name, config)
 
     def stop(self):
         self.stop_event.set()
@@ -103,7 +106,8 @@ class CameraWorker(threading.Thread):
                     self.reset_generation = reset_generation
 
                 events, status, people = self.counter.update(detections, frame.shape, now, current_count)
-                annotated = self._annotate(frame.copy(), people)
+                display_count = events[-1].count_after if events else current_count
+                annotated = self._annotate(frame.copy(), people, status, display_count, events)
 
             for event in events:
                 with self.shared.lock:
@@ -125,8 +129,23 @@ class CameraWorker(threading.Thread):
         with self.shared.lock:
             self.shared.frames[self.name] = frame
 
-    def _annotate(self, frame, people):
-        self._draw_zones(frame)
+    def _annotate(self, frame, people, status, count, events=()):
+        self._draw_counting_line(frame)
+        for track in self.counter.track_visuals():
+            trail = np.array([[int(x), int(y)] for x, y in track["trail"]], dtype=np.int32)
+            if len(trail) >= 2:
+                cv2.polylines(frame, [trail], False, (255, 255, 0), 2)
+            if len(trail):
+                x, y = trail[-1]
+                cv2.putText(
+                    frame,
+                    f'id {track["track_id"]} side {track["side"]}',
+                    (int(x) + 8, int(y) + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (255, 255, 0),
+                    2,
+                )
         for det in people:
             color = (0, 180, 0)
             x1, y1, x2, y2 = det.box
@@ -141,74 +160,27 @@ class CameraWorker(threading.Thread):
                 cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), (0, 220, 255), 2)
             point_x, point_y = self.counter.detection_point(det)
             cv2.circle(frame, (int(point_x), int(point_y)), 6, (0, 0, 255), -1)
-            point_source = getattr(det, "point_source", "person")
-            if not getattr(self.counter, "use_detection_point", False):
-                point_source = "person-top"
-            cv2.putText(frame, point_source, (int(point_x) + 8, int(point_y) - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+            cv2.putText(frame, "track-point", (int(point_x) + 8, int(point_y) - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
+        event_text = ", ".join(event.event.upper() for event in events)
+        status_line = f"COUNT {count} | {status}"
+        if event_text:
+            status_line += f" | {event_text}"
+        cv2.rectangle(frame, (8, 8), (min(frame.shape[1] - 8, 720), 50), (0, 0, 0), -1)
+        cv2.putText(frame, status_line, (18, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         return frame
 
-    def _draw_zones(self, frame):
+    def _draw_counting_line(self, frame):
         h, w = frame.shape[:2]
-        default_label, _ = self.counter.zone_layout()
-        default_color = self._zone_color(default_label)
-        polygons = self.counter.zone_polygons(w, h)
-        if not any(label == default_label for label, _ in polygons):
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (0, 0), (w, h), default_color, -1)
-            cv2.addWeighted(overlay, 0.08, frame, 0.92, 0, frame)
-            cv2.rectangle(frame, (0, 0), (w - 1, h - 1), default_color, 2)
-            cv2.putText(frame, default_label, (12, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 1.2, default_color, 3)
-
-        for label, polygon in polygons:
-            points = np.array([[int(x), int(y)] for x, y in polygon], dtype=np.int32)
-            color = self._zone_color(label)
-            overlay = frame.copy()
-            cv2.fillPoly(overlay, [points], color)
-            cv2.addWeighted(overlay, 0.18, frame, 0.82, 0, frame)
-            cv2.polylines(frame, [points], True, color, 3)
-            cv2.putText(frame, label, self._zone_label_origin(label, points), cv2.FONT_HERSHEY_SIMPLEX, 1.2, color, 3)
-
-    def _zone_label_origin(self, label, points):
-        x, y, box_w, box_h = cv2.boundingRect(points)
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 1.2
-        thickness = 3
-        (text_w, text_h), baseline = cv2.getTextSize(label, font, font_scale, thickness)
-        left_margin = 30 if label == "A" else 12
-        min_x = x + left_margin
-        max_x = x + box_w - text_w - 4
-        min_y = y + text_h + 4
-        max_y = y + box_h - baseline - 12
-        for label_y in range(max_y, min_y - 1, -4):
-            for label_x in range(min_x, max_x + 1, 4):
-                if self._text_box_inside_polygon(points, label_x, label_y, text_w, text_h, baseline):
-                    return label_x, label_y
-        for label_y in range(y + box_h - 4, y + 3, -4):
-            for label_x in range(x + 4, x + box_w - 3, 4):
-                if cv2.pointPolygonTest(points, (label_x, label_y), False) >= 0:
-                    return label_x, label_y
-        return x + 4, y + text_h + 4
-
-    def _text_box_inside_polygon(self, points, x, y, text_w, text_h, baseline):
-        check_points = (
-            (x, y - text_h),
-            (x + text_w // 2, y - text_h),
-            (x + text_w, y - text_h),
-            (x, y - text_h // 2),
-            (x + text_w, y - text_h // 2),
-            (x, y + baseline),
-            (x + text_w // 2, y + baseline),
-            (x + text_w, y + baseline),
-            (x + text_w // 2, y - text_h // 2),
-        )
-        return all(cv2.pointPolygonTest(points, point, False) >= 0 for point in check_points)
-
-    def _zone_color(self, label):
-        if label == "A":
-            return (255, 120, 0)
-        if label == "B":
-            return (0, 220, 255)
-        return (255, 255, 255)
+        line = self.counter.counting_line(w, h)
+        if line is None:
+            return
+        start, end = line
+        start = (int(start[0]), int(start[1]))
+        end = (int(end[0]), int(end[1]))
+        cv2.line(frame, start, end, (0, 220, 255), 4)
+        cv2.circle(frame, start, 7, (0, 220, 255), -1)
+        cv2.circle(frame, end, 7, (0, 220, 255), -1)
+        cv2.putText(frame, "COUNT LINE", (start[0], max(30, start[1] - 14)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 220, 255), 2)
 
 
 class PersonnelCountApp:
