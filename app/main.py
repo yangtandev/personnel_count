@@ -16,34 +16,8 @@ from config.loader import load_config
 from counting.lines import LineCounter
 from detection.person import PersonDetector
 from storage.recorder import Recorder
+from ui.status import user_status_text
 from ui.window import PersonnelCountWindow
-
-
-STATUS_TEXT = {
-    "starting": "啟動中",
-    "camera_waiting": "等待攝影機畫面",
-    "detector_error": "偵測異常",
-    "waiting": "等待人員通過",
-    "tracking": "追蹤人員移動中",
-    "incomplete_path": "路徑未完成，未計數",
-    "cooldown": "已計數，等待人員離開",
-    "unknown_direction": "方向不明，未計數",
-    "counted_enter": "已計入進入",
-    "counted_exit": "已計入離開",
-    "near_line": "人員接近計數線",
-    "crossing_rejected": "未穿越有效線段，不計數",
-    "tracking_unavailable": "追蹤 ID 無法使用，停止計數",
-    "line_not_configured": "尚未設定計數線",
-    "flow_reverse_ignored": "反向事件已由方向鎖忽略",
-    "stabilizing": "確認軌跡起始側",
-    "rearming": "等待軌跡重新定位",
-    "crossing_pending": "確認跨線方向",
-    "point_jump": "追蹤點跳動，重新定位",
-}
-
-
-def user_status_text(status):
-    return STATUS_TEXT.get(status, "系統運作中")
 
 
 class SharedState:
@@ -110,8 +84,7 @@ class CameraWorker(threading.Thread):
                     self.reset_generation = reset_generation
 
                 events, status, people = self.counter.update(detections, frame.shape, now, current_count)
-                display_count = events[-1].count_after if events else current_count
-                annotated = self._annotate(frame.copy(), people, status, display_count, events)
+                annotated = self._annotate(frame.copy(), people)
 
             for event in events:
                 with self.shared.lock:
@@ -133,7 +106,7 @@ class CameraWorker(threading.Thread):
         with self.shared.lock:
             self.shared.frames[self.name] = frame
 
-    def _annotate(self, frame, people, status, count, events=()):
+    def _annotate(self, frame, people):
         self._draw_counting_line(frame)
         for track in self.counter.track_visuals():
             trail = np.array([[int(x), int(y)] for x, y in track["trail"]], dtype=np.int32)
@@ -165,12 +138,6 @@ class CameraWorker(threading.Thread):
             point_x, point_y = self.counter.detection_point(det)
             cv2.circle(frame, (int(point_x), int(point_y)), 6, (0, 0, 255), -1)
             cv2.putText(frame, "track-point", (int(point_x) + 8, int(point_y) - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
-        event_text = ", ".join(event.event.upper() for event in events)
-        status_line = f"COUNT {count} | {status}"
-        if event_text:
-            status_line += f" | {event_text}"
-        cv2.rectangle(frame, (8, 8), (min(frame.shape[1] - 8, 720), 50), (0, 0, 0), -1)
-        cv2.putText(frame, status_line, (18, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         return frame
 
     def _draw_counting_line(self, frame):

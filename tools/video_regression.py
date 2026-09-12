@@ -47,7 +47,7 @@ def validate_events(dataset, events):
         raise AssertionError(f"{dataset}: event runs {actual}, expected {expected}")
 
 
-def annotate(frame, counter, detections, status, count, source_name, source_time, event_text):
+def annotate(frame, counter, detections):
     line = counter.counting_line(frame.shape[1], frame.shape[0])
     if line is not None:
         start = tuple(round(value) for value in line[0])
@@ -82,19 +82,6 @@ def annotate(frame, counter, detections, status, count, source_name, source_time
         point = counter.detection_point(detection)
         cv2.circle(frame, tuple(round(value) for value in point), 6, (0, 0, 255), -1)
 
-    lines = [
-        f"COUNT {count}   STATUS {status}",
-        f"SOURCE {source_name} {source_time:06.2f}s   LOCK {'ON' if counter.flow_direction_lock else 'OFF'}",
-        "+ to - / - to +: see camera direction mapping",
-    ]
-    if event_text:
-        lines.append(f"EVENT {event_text}")
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (8, 8), (min(frame.shape[1] - 8, 900), 20 + len(lines) * 32), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
-    for index, text in enumerate(lines):
-        color = (0, 255, 255) if text.startswith("EVENT") else (255, 255, 255)
-        cv2.putText(frame, text, (20, 38 + index * 32), cv2.FONT_HERSHEY_SIMPLEX, 0.72, color, 2)
     return frame
 
 
@@ -102,18 +89,23 @@ def run_dataset(name, camera_name, source_name, config, output_fps):
     source = project_path(source_name)
     if not source.exists():
         raise FileNotFoundError(source)
+    print(json.dumps({"dataset": name, "stage": "initializing counter"}), flush=True)
     counter = LineCounter(camera_name, config)
     if counter.counting_line(1920, 1080) is None:
         raise RuntimeError(f"counting line not configured: {camera_name}")
 
     detector_config = copy.deepcopy(config)
     detector_config["model"]["use_face_detection"] = False
+    print(json.dumps({"dataset": name, "stage": "loading detector"}), flush=True)
     detector = PersonDetector(detector_config)
+    print(json.dumps({"dataset": name, "stage": "opening video"}), flush=True)
     cap = cv2.VideoCapture(str(source))
     source_fps = cap.get(cv2.CAP_PROP_FPS)
     stride = max(1, round(source_fps / output_fps))
     output_size = (1280, 720)
+    ui_output_size = (1280, 820)
     temp_output = project_path(f".{name}_regression_mp4v.tmp.mp4")
+    ui_temp_output = project_path(f".{name}_regression_ui_mp4v.tmp.mp4")
     final_output = project_path(f"{name}_regression_h264.mp4")
     writer = cv2.VideoWriter(
         str(temp_output), cv2.VideoWriter_fourcc(*"mp4v"), output_fps, output_size
@@ -123,8 +115,7 @@ def run_dataset(name, camera_name, source_name, config, output_fps):
 
     count = int(config["counter"].get("initial_count", 0))
     all_events = []
-    banner = ""
-    banner_until = -1.0
+    frame_states = []
     next_progress = 0.0
     try:
         while True:
@@ -145,8 +136,6 @@ def run_dataset(name, camera_name, source_name, config, output_fps):
             events, status, people = counter.update(detections, frame.shape, source_time, count)
             if events:
                 count = events[-1].count_after
-                banner = " + ".join(event.event.upper() for event in events)
-                banner_until = source_time + 1.0
                 all_events.extend(
                     {
                         "time": round(source_time, 3),
@@ -159,17 +148,9 @@ def run_dataset(name, camera_name, source_name, config, output_fps):
                     }
                     for event in events
                 )
-            annotated = annotate(
-                frame.copy(),
-                counter,
-                people,
-                status,
-                count,
-                source.name,
-                source_time,
-                banner if source_time <= banner_until else "",
-            )
+            annotated = annotate(frame.copy(), counter, people)
             writer.write(cv2.resize(annotated, output_size, interpolation=cv2.INTER_AREA))
+            frame_states.append((count, status))
     finally:
         cap.release()
         writer.release()
@@ -179,6 +160,29 @@ def run_dataset(name, camera_name, source_name, config, output_fps):
         temp_output.unlink(missing_ok=True)
         raise RuntimeError("tracking unavailable; install lapx before running regression")
 
+    from ui.regression_renderer import RegressionWindowRenderer
+
+    renderer = RegressionWindowRenderer(config, camera_name, ui_output_size)
+    ui_writer = cv2.VideoWriter(
+        str(ui_temp_output), cv2.VideoWriter_fourcc(*"mp4v"), output_fps, ui_output_size
+    )
+    ui_cap = cv2.VideoCapture(str(temp_output))
+    if not ui_writer.isOpened() or not ui_cap.isOpened():
+        ui_cap.release()
+        ui_writer.release()
+        renderer.close()
+        raise RuntimeError(f"cannot render UI regression output: {name}")
+    try:
+        for count, status in frame_states:
+            ok, frame = ui_cap.read()
+            if not ok:
+                raise RuntimeError(f"annotated regression frame missing: {name}")
+            ui_writer.write(renderer.render(frame, count, status))
+    finally:
+        ui_cap.release()
+        ui_writer.release()
+        renderer.close()
+
     subprocess.run(
         [
             "ffmpeg",
@@ -187,7 +191,7 @@ def run_dataset(name, camera_name, source_name, config, output_fps):
             "error",
             "-y",
             "-i",
-            str(temp_output),
+            str(ui_temp_output),
             "-c:v",
             "libx264",
             "-preset",
@@ -204,6 +208,7 @@ def run_dataset(name, camera_name, source_name, config, output_fps):
         check=True,
     )
     temp_output.unlink()
+    ui_temp_output.unlink()
     report = {
         "dataset": name,
         "camera": camera_name,
@@ -222,10 +227,13 @@ def run_dataset(name, camera_name, source_name, config, output_fps):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("datasets", nargs="*", choices=DATASETS)
+    parser.add_argument("datasets", nargs="*")
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--fps", type=float, default=15.0)
     args = parser.parse_args()
+    unknown_datasets = sorted(set(args.datasets) - DATASETS.keys())
+    if unknown_datasets:
+        parser.error(f"unknown dataset(s): {', '.join(unknown_datasets)}")
 
     config = load_config(args.config)
     reports = []
