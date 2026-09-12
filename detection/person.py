@@ -3,7 +3,10 @@ from pathlib import Path
 import threading
 
 import cv2
-from ultralytics import YOLOv10
+try:
+    from ultralytics import YOLOv10
+except ImportError:
+    from ultralytics import YOLO as YOLOv10
 
 try:
     import mediapipe as mp
@@ -11,6 +14,7 @@ except ImportError:
     mp = None
 
 from config.loader import project_path
+from detection.head_assignment import match_heads_to_people
 
 
 @dataclass(frozen=True)
@@ -116,12 +120,22 @@ class PersonDetector:
                 int(round(y2 * scale_y)),
             )
             track_id = track_ids[index] if index < len(track_ids) else None
-            head = _best_head_for_person(head_boxes, box)
-            point_source = head["source"] if head else "person"
-            point = _box_center(head["box"]) if head else None
-            head_box = head["box"] if head else None
-            detections.append(Detection(box, conf, cls_id, track_id, point, point_source, head_box))
-        return self._remove_duplicate_people(detections)
+            detections.append(Detection(box, conf, cls_id, track_id))
+
+        detections = self._remove_duplicate_people(detections)
+        matched_heads = match_heads_to_people(head_boxes, [item.box for item in detections])
+        return [
+            Detection(
+                item.box,
+                item.conf,
+                item.cls,
+                item.track_id,
+                _box_center(head["box"]) if head else None,
+                head["source"] if head else "person",
+                head["box"] if head else None,
+            )
+            for item, head in zip(detections, matched_heads)
+        ]
 
     def close(self):
         if self.face_detector is not None:
@@ -252,27 +266,3 @@ def _scale_box(box, scale_x, scale_y):
         int(round(x2 * scale_x)),
         int(round(y2 * scale_y)),
     )
-
-
-def _best_head_for_person(heads, person_box):
-    x1, y1, x2, y2 = person_box
-    person_w = max(1, x2 - x1)
-    person_h = max(1, y2 - y1)
-    best = None
-    best_score = -1
-    for head in heads:
-        hx1, hy1, hx2, hy2 = head["box"]
-        head_w = max(1, hx2 - hx1)
-        head_h = max(1, hy2 - hy1)
-        if head["source"] == "face" and (head_w > person_w * 0.75 or head_h > person_h * 0.45):
-            continue
-        cx, cy = _box_center(head["box"])
-        if not (x1 - 20 <= cx <= x2 + 20 and y1 - 10 <= cy <= y1 + (y2 - y1) * 0.55):
-            continue
-        score = head["conf"] + (2.0 if head["source"] == "head" else 0.0)
-        if _box_iou((hx1, hy1, hx2, hy2), person_box) <= 0 and score < 1.0:
-            continue
-        if score > best_score:
-            best = head
-            best_score = score
-    return best

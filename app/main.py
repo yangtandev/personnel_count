@@ -35,6 +35,10 @@ STATUS_TEXT = {
     "tracking_unavailable": "追蹤 ID 無法使用，停止計數",
     "line_not_configured": "尚未設定計數線",
     "flow_reverse_ignored": "反向事件已由方向鎖忽略",
+    "stabilizing": "確認軌跡起始側",
+    "rearming": "等待軌跡重新定位",
+    "crossing_pending": "確認跨線方向",
+    "point_jump": "追蹤點跳動，重新定位",
 }
 
 
@@ -139,7 +143,7 @@ class CameraWorker(threading.Thread):
                 x, y = trail[-1]
                 cv2.putText(
                     frame,
-                    f'id {track["track_id"]} side {track["side"]}',
+                    f'uid {track["stable_id"]} / id {track["track_id"]} {track["point_source"]} side {track["side"]} {track["state"]}',
                     (int(x) + 8, int(y) + 20),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.55,

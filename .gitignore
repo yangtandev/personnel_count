@@ -9,9 +9,11 @@ tests/
 scratch/
 *.jpg
 *.mp4
+*_regression.json
 test_*
 tools/*
 !tools/calibrate_line.py
+!tools/video_regression.py
 
 # Python
 venv/

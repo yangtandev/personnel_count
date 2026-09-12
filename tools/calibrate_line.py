@@ -12,6 +12,7 @@ import cv2
 
 from camera.capture import VideoCapture
 from config.loader import DEFAULT_CONFIG_PATH, load_config
+from counting.calibration import suggest_counting_line
 
 
 def parse_args():
@@ -20,6 +21,9 @@ def parse_args():
     parser.add_argument("--camera", default="top", choices=("top", "bottom"))
     parser.add_argument("--output", help="default: overwrite --config")
     parser.add_argument("--image", help="use an image instead of grabbing the camera")
+    parser.add_argument("--auto-video", help="suggest line geometry from tracked movement in a video")
+    parser.add_argument("--auto-seconds", type=float, default=60.0)
+    parser.add_argument("--save-auto", action="store_true", help="save suggestion without GUI confirmation")
     parser.add_argument("--timeout", type=float, default=20.0)
     return parser.parse_args()
 
@@ -105,10 +109,52 @@ def edit_line(frame, points):
             return points
 
 
+def analyze_video(config, video_path, seconds):
+    from detection.person import PersonDetector
+
+    capture = cv2.VideoCapture(video_path)
+    if not capture.isOpened():
+        raise FileNotFoundError(f"cannot open video: {video_path}")
+    detector_config = json.loads(json.dumps(config))
+    detector_config["model"]["use_face_detection"] = False
+    detector = PersonDetector(detector_config)
+    fps = capture.get(cv2.CAP_PROP_FPS) or 15.0
+    tracks = {}
+    preview = None
+    frame_index = 0
+    try:
+        while frame_index / fps < seconds:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            preview = frame
+            for detection in detector.detect(frame):
+                if detection.track_id is None:
+                    continue
+                if detection.point is not None:
+                    point = detection.point
+                else:
+                    x1, y1, x2, y2 = detection.box
+                    point = ((x1 + x2) / 2, y1 + (y2 - y1) * 0.15)
+                tracks.setdefault(detection.track_id, []).append(point)
+            frame_index += 1
+    finally:
+        capture.release()
+        detector.close()
+    if preview is None:
+        raise ValueError("video has no decodable frames")
+    height, width = preview.shape[:2]
+    points = suggest_counting_line(list(tracks.values()), width, height)
+    return preview, points
+
+
 def main():
     args = parse_args()
     config = load_config(args.config)
-    if args.image:
+    points = None
+    if args.auto_video:
+        frame, points = analyze_video(config, args.auto_video, args.auto_seconds)
+    elif args.image:
         frame = cv2.imread(args.image)
         if frame is None:
             raise FileNotFoundError(f"cannot read image: {args.image}")
@@ -117,7 +163,10 @@ def main():
 
     height, width = frame.shape[:2]
     existing = config.get("crossing", {}).get("lines", {}).get(args.camera, [])
-    points = edit_line(frame, denormalized(existing, width, height))
+    if points is None:
+        points = denormalized(existing, width, height)
+    if not (args.auto_video and args.save_auto):
+        points = edit_line(frame, points)
     if points is None:
         print("Canceled. Config unchanged.")
         return 1
