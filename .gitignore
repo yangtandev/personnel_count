@@ -11,6 +11,7 @@ scratch/
 *.mp4
 *_regression.json
 test_*
+!test_capture_quality.py
 tools/*
 !tools/calibrate_line.py
 !tools/video_regression.py

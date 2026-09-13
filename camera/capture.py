@@ -12,6 +12,16 @@ from urllib.parse import urlparse
 
 _best_decoder_info = {'name': 'cpu', 'checked': False}
 
+
+def _quality_sample(frame):
+    """Return a small, stable image for inexpensive frame-health checks."""
+    height, width = frame.shape[:2]
+    target_width = min(320, width)
+    target_height = max(1, round(height * target_width / width))
+    if (target_width, target_height) == (width, height):
+        return frame
+    return cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
+
 def get_best_hw_accel():
     """
     Correctly detects VAAPI support under Ubuntu by checking -hwaccels.
@@ -74,15 +84,20 @@ def frame_quality_issue(frame):
     if height < 2 or width < 2:
         return "invalid_frame"
 
-    # Sparse sampling avoids a resize allocation and keeps this off the inference path.
-    step_y = max(1, height // 45)
-    step_x = max(1, width // 80)
-    sample = frame[::step_y, ::step_x][:45, :80, :3].astype(np.int16)
+    sample = _quality_sample(frame)[:, :, :3].astype(np.int16)
     channel_range = sample.max(axis=2) - sample.min(axis=2)
     green_dominance = sample[:, :, 1] - np.maximum(sample[:, :, 0], sample[:, :, 2])
+    green_pixels = (sample[:, :, 1] > 90) & (green_dominance > 70)
 
     if np.mean(green_dominance > 80) >= 0.80:
         return "green_screen"
+
+    # Decoder corruption is commonly localized.  Check tiles, not just the
+    # full-frame average, so a green/noisy block cannot hide in a normal scene.
+    for row in np.array_split(green_pixels, 4, axis=0):
+        for tile in np.array_split(row, 4, axis=1):
+            if tile.size and float(tile.mean()) >= 0.55:
+                return "green_block"
 
     if float(channel_range.mean()) <= 2.0 and float(sample.std()) <= 3.0:
         return "flat_gray_frame"
@@ -99,6 +114,15 @@ def frame_quality_issue(frame):
     ):
         return "decode_artifacts"
 
+    color_jump = np.zeros(channel_range.shape, dtype=bool)
+    color_jump[:, 1:] |= np.max(np.abs(sample[:, 1:] - sample[:, :-1]), axis=2) > 65
+    color_jump[1:, :] |= np.max(np.abs(sample[1:] - sample[:-1]), axis=2) > 65
+    noisy_pixels = (channel_range > 90) & color_jump
+    for row in np.array_split(noisy_pixels, 4, axis=0):
+        for tile in np.array_split(row, 4, axis=1):
+            if tile.size and float(tile.mean()) >= 0.30:
+                return "noise_block"
+
     bottom = sample[max(1, sample.shape[0] * 4 // 5):]
     upper = sample[:max(1, sample.shape[0] * 4 // 5)]
     if (
@@ -109,6 +133,38 @@ def frame_quality_issue(frame):
         return "bad_gray_band"
 
     return None
+
+
+def frame_sharpness(frame):
+    sample = _quality_sample(frame)
+    gray = cv2.cvtColor(sample, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+class FrameQualityGate:
+    """Rejects obvious artifacts and a sudden full-frame loss of sharpness."""
+
+    def __init__(self):
+        self.sharpness_baseline = None
+        self.low_sharpness_frames = 0
+
+    def check(self, frame):
+        issue = frame_quality_issue(frame)
+        if issue is not None:
+            return issue
+
+        sharpness = frame_sharpness(frame)
+        baseline = self.sharpness_baseline
+        if baseline is not None and baseline >= 20 and sharpness < baseline * 0.20:
+            self.low_sharpness_frames += 1
+            if self.low_sharpness_frames >= 2:
+                return "blurred_frame"
+        else:
+            self.low_sharpness_frames = 0
+            self.sharpness_baseline = (
+                sharpness if baseline is None else baseline * 0.98 + sharpness * 0.02
+            )
+        return None
 
 
 # --- VideoCapture Class ---
@@ -122,7 +178,12 @@ class VideoCapture:
         self.rtsp_url = rtsp_url
         self.latest_frame = None
         self.latest_frame_ready = threading.Condition()
+        self.quality_gate = FrameQualityGate()
         self._last_bad_frame_log_at = 0.0
+        self._consecutive_bad_frames = 0
+        self._restart_requested_for = None
+        self._progress_lock = threading.Lock()
+        self._progress_anchor = None
         self.stop_threads = False
         self.proc = None
         self.config = config_data or {}
@@ -160,6 +221,18 @@ class VideoCapture:
         except (TypeError, ValueError):
             return 10.0
 
+    def _max_lag(self):
+        try:
+            return max(1.0, float(self.config.get("camera_max_lag_sec", 3)))
+        except (TypeError, ValueError):
+            return 3.0
+
+    def _bad_frame_restart_count(self):
+        try:
+            return max(2, int(self.config.get("camera_bad_frame_restart_count", 8)))
+        except (TypeError, ValueError):
+            return 8
+
     def _output_size(self, source_width, source_height):
         try:
             width = int(self.config.get("camera_output_width") or 0)
@@ -187,7 +260,62 @@ class VideoCapture:
         thread = threading.Thread(target=watch, daemon=True)
         thread.start()
 
+    def _request_restart(self, proc, reason):
+        if proc is None or self.proc is not proc or proc.poll() is not None:
+            return
+        with self._progress_lock:
+            if self._restart_requested_for is proc:
+                return
+            self._restart_requested_for = proc
+        with self.latest_frame_ready:
+            self.latest_frame = None
+        print(f"{reason}. Restarting FFmpeg.")
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+    def _observe_progress(self, proc, media_time_us, pipeline_type):
+        if self.proc is not proc:
+            return
+        try:
+            media_time_us = int(media_time_us)
+        except (TypeError, ValueError):
+            return
+        if media_time_us < 0:
+            return
+
+        now = time.monotonic()
+        restart = False
+        with self._progress_lock:
+            if self._restart_requested_for is proc:
+                return
+            if self._progress_anchor is None:
+                self._progress_anchor = (media_time_us, now)
+                return
+            anchor_media_time_us, anchor_wall_time = self._progress_anchor
+            if media_time_us < anchor_media_time_us:
+                self._progress_anchor = (media_time_us, now)
+                return
+            lag = (now - anchor_wall_time) - ((media_time_us - anchor_media_time_us) / 1_000_000)
+            restart = lag > self._max_lag()
+        if restart:
+            self._request_restart(proc, f"{pipeline_type}: stream lag {lag:.1f}s exceeds {self._max_lag():g}s")
+
+    def _drain_ffmpeg_stderr(self, proc, pipeline_type):
+        while not self.stop_threads:
+            line = proc.stderr.readline()
+            if not line:
+                return
+            text = line.decode("utf-8", errors="replace").strip()
+            if text.startswith("out_time_us="):
+                self._observe_progress(proc, text.partition("=")[2], pipeline_type)
+            elif "=" not in text and text:
+                print(f"{pipeline_type}: {_safe_output(text, self.rtsp_url)}")
+
     def _rtsp_input_options(self):
+        if not self._is_rtsp_stream():
+            return []
         return self._rtsp_input_options_for(self._current_rtsp_transport)
 
     def _is_rtsp_stream(self):
@@ -203,14 +331,21 @@ class VideoCapture:
         return transports or ["tcp"]
 
     def _publish_latest_frame(self, frame):
-        issue = frame_quality_issue(frame)
+        issue = self.quality_gate.check(frame)
         if issue is not None:
+            self._consecutive_bad_frames += 1
             now = time.monotonic()
             if now - getattr(self, "_last_bad_frame_log_at", 0.0) >= 5.0:
                 print(f"Frame quality: dropped {issue} from {_safe_url(self.rtsp_url)}.")
                 self._last_bad_frame_log_at = now
+            if self._consecutive_bad_frames >= self._bad_frame_restart_count():
+                self._request_restart(
+                    self.proc,
+                    f"Frame quality: {self._consecutive_bad_frames} consecutive bad frames from {_safe_url(self.rtsp_url)}",
+                )
             return False
 
+        self._consecutive_bad_frames = 0
         with self.latest_frame_ready:
             self.latest_frame = frame
             self.latest_frame_ready.notify()
@@ -244,10 +379,11 @@ class VideoCapture:
         """Uses ffprobe to get resolution needed for the raw video pipeline."""
         print(f"Probing video stream via {transport.upper()} for resolution (for raw pipeline)...")
         try:
+            input_options = self._rtsp_input_options_for(transport) if self._is_rtsp_stream() else []
             command = [
                 'ffprobe', '-v', 'error', '-select_streams', 'v:0',
                 '-show_entries', 'stream=codec_name,width,height', '-of', 'json',
-            ] + self._rtsp_input_options_for(transport) + [self.rtsp_url]
+            ] + input_options + [self.rtsp_url]
             timeout = self.config.get("ffprobe_timeout") or 5  # [2026-04-24] Default 5s to prevent hang
             result = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
             if result.returncode != 0:
@@ -291,9 +427,9 @@ class VideoCapture:
     def _has_video_info(self):
         return bool(self.width and self.height and self.width > 0 and self.height > 0)
 
-    def _start_raw_video_pipeline(self, use_hw_accel=False, error_tolerant=False):
-        """Attempts to start a raw video pipeline, with optional HW accel and error tolerance."""
-        pipeline_type = "HW Accel Raw" if use_hw_accel else "Err-Tolerant Raw"
+    def _start_raw_video_pipeline(self, use_hw_accel=False):
+        """Starts a low-latency raw-video pipeline."""
+        pipeline_type = "HW Accel Raw" if use_hw_accel else "Low-Latency Raw"
         print(f"Attempting {pipeline_type} pipeline for {_safe_url(self.rtsp_url)}...")
 
         if not self._has_video_info() and not self._probe_video_info_for_raw_pipeline():
@@ -306,20 +442,22 @@ class VideoCapture:
         if self.width is None or self.height is None:
             raise RuntimeError(f"Failed to determine stream resolution for {pipeline_type}.")
 
-        command = ['ffmpeg', '-hide_banner', '-loglevel', 'error']
+        command = [
+            'ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin',
+            '-stats_period', '1', '-progress', 'pipe:2',
+        ]
         
         # Use prefer_tcp flag, which is more robust for forcing TCP transport
         # [2026-01-14 Latency Fix] Combined flags to prevent overwriting
-        fflags = []
-        if error_tolerant:
-            fflags.append('discardcorrupt')
-            command.extend(['-err_detect', 'ignore_err'])
-            
-        if fflags:
-            command.extend(['-fflags', '+'.join(fflags)])
-            
+        # These are input options.  Keep them before -i: FFmpeg applies an
+        # option to the next input/output file, not globally.
+        command.extend([
+            '-fflags', '+nobuffer+discardcorrupt',
+            '-avioflags', 'direct',
+            '-max_delay', '0',
+        ])
         command.extend(self._rtsp_input_options())
-        command.extend(['-flags', 'low_delay'])
+        command.extend(['-flags', '+low_delay'])
 
         if use_hw_accel:
             # Add the appropriate hardware acceleration arguments if VAAPI is detected
@@ -331,17 +469,29 @@ class VideoCapture:
         command.extend([
             '-i', self.rtsp_url,
             '-vf', f'scale={self.width}:{self.height}',
+            '-fps_mode', 'passthrough',
             '-f', 'rawvideo',
             '-pix_fmt', 'bgr24',
             '-'
         ])
 
-        self.proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, preexec_fn=_ignore_sigint)
+        self.proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=_ignore_sigint)
+        with self._progress_lock:
+            self._progress_anchor = None
+            self._restart_requested_for = None
+        self.quality_gate = FrameQualityGate()
+        self._consecutive_bad_frames = 0
         
         frame_size = self.width * self.height * 3
         print(f"{pipeline_type}: FFmpeg process started. Reading {frame_size} byte raw frames ({self.width}x{self.height}).")
         last_frame_at = [time.monotonic()]
         self._start_frame_watchdog(self.proc, last_frame_at, pipeline_type)
+        stderr_thread = threading.Thread(
+            target=self._drain_ffmpeg_stderr,
+            args=(self.proc, pipeline_type),
+            daemon=True,
+        )
+        stderr_thread.start()
         drain_thread = threading.Thread(
             target=self._drain_raw_frames,
             args=(self.proc, frame_size, last_frame_at, pipeline_type),
@@ -400,10 +550,10 @@ class VideoCapture:
                 # 2. If HW failed (or not available), try Error-Tolerant Raw Video Pipeline (Software)
                 if not pipeline_success and not self.stop_threads:
                     try:
-                        print("Trying error-tolerant raw pipeline...")
-                        pipeline_success = self._start_raw_video_pipeline(use_hw_accel=False, error_tolerant=True)
+                        print("Trying low-latency raw pipeline...")
+                        pipeline_success = self._start_raw_video_pipeline(use_hw_accel=False)
                     except Exception as e:
-                        print(f"Error-tolerant raw pipeline failed: {e}.")
+                        print(f"Low-latency raw pipeline failed: {e}.")
                         pipeline_success = False
 
                 # 3. If all above failed, fall back to robust Software MJPEG Pipeline.

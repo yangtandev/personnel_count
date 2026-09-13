@@ -69,6 +69,8 @@ config = {
         "bottom": "$BOTTOM_CAMERA",
         "camera_connect_timeout_sec": 5,
         "camera_frame_timeout_sec": 10,
+        "camera_max_lag_sec": 3,
+        "camera_bad_frame_restart_count": 8,
         "camera_reconnect_delay_sec": 2,
         "ffprobe_timeout": 5,
         "camera_output_width": 1280,
