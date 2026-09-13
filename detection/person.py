@@ -14,6 +14,7 @@ except ImportError:
     mp = None
 
 from config.loader import project_path
+from detection.appearance import appearance_descriptor
 from detection.head_assignment import match_heads_to_people
 
 
@@ -26,6 +27,7 @@ class Detection:
     point: tuple = None
     point_source: str = "person"
     head_box: tuple = None
+    appearance: tuple = None
 
     @property
     def center_x(self):
@@ -56,6 +58,7 @@ class PersonDetector:
         self.head_class_ids = {int(cls) for cls in model_cfg.get("head_class_ids", [2])}
         self.detect_class_ids = sorted({self.person_class_id, *self.head_class_ids})
         self.use_face_detection = bool(model_cfg.get("use_face_detection", True))
+        self.use_appearance_memory = bool(model_cfg.get("use_appearance_memory", True))
         self.lock = threading.Lock()
         self.tracking_failed = False
         self.face_detector = None
@@ -133,6 +136,7 @@ class PersonDetector:
                 _box_center(head["box"]) if head else None,
                 head["source"] if head else "person",
                 head["box"] if head else None,
+                appearance_descriptor(frame, item.box) if self.use_appearance_memory else None,
             )
             for item, head in zip(detections, matched_heads)
         ]

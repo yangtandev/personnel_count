@@ -48,8 +48,23 @@ def validate_events(dataset, events):
 
 
 def annotate(frame, counter, detections):
-    line = counter.counting_line(frame.shape[1], frame.shape[0])
-    if line is not None:
+    mode, geometry = counter.counting_geometry(frame.shape[1], frame.shape[0])
+    if mode == "corridor" and geometry is not None:
+        colors = {
+            "outside": (255, 120, 0),
+            "transit": (0, 220, 255),
+            "inside": (0, 200, 0),
+        }
+        for name, polygon in geometry.items():
+            points = np.array([[round(x), round(y)] for x, y in polygon], dtype=np.int32)
+            overlay = frame.copy()
+            cv2.fillPoly(overlay, [points], colors[name])
+            cv2.addWeighted(overlay, 0.12, frame, 0.88, 0, frame)
+            cv2.polylines(frame, [points], True, colors[name], 3)
+            x, y = points[0]
+            cv2.putText(frame, name.upper(), (x, max(30, y - 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[name], 2)
+    elif geometry is not None:
+        line = geometry
         start = tuple(round(value) for value in line[0])
         end = tuple(round(value) for value in line[1])
         cv2.line(frame, start, end, (0, 220, 255), 4)
@@ -85,14 +100,15 @@ def annotate(frame, counter, detections):
     return frame
 
 
-def run_dataset(name, camera_name, source_name, config, output_fps):
+def run_dataset(name, camera_name, source_name, config, output_fps, start_time=0.0, end_time=None, output_name=None):
     source = project_path(source_name)
     if not source.exists():
         raise FileNotFoundError(source)
     print(json.dumps({"dataset": name, "stage": "initializing counter"}), flush=True)
     counter = LineCounter(camera_name, config)
-    if counter.counting_line(1920, 1080) is None:
-        raise RuntimeError(f"counting line not configured: {camera_name}")
+    _, geometry = counter.counting_geometry(1920, 1080)
+    if geometry is None:
+        raise RuntimeError(f"counting geometry not configured: {camera_name}")
 
     detector_config = copy.deepcopy(config)
     detector_config["model"]["use_face_detection"] = False
@@ -106,7 +122,8 @@ def run_dataset(name, camera_name, source_name, config, output_fps):
     ui_output_size = (1280, 820)
     temp_output = project_path(f".{name}_regression_mp4v.tmp.mp4")
     ui_temp_output = project_path(f".{name}_regression_ui_mp4v.tmp.mp4")
-    final_output = project_path(f"{name}_regression_h264.mp4")
+    output_stem = output_name or f"{name}_regression"
+    final_output = project_path(f"{output_stem}_h264.mp4")
     writer = cv2.VideoWriter(
         str(temp_output), cv2.VideoWriter_fourcc(*"mp4v"), output_fps, output_size
     )
@@ -126,6 +143,10 @@ def run_dataset(name, camera_name, source_name, config, output_fps):
             if frame_no % stride:
                 continue
             source_time = frame_no / source_fps
+            if source_time < start_time:
+                continue
+            if end_time is not None and source_time > end_time:
+                break
             if source_time >= next_progress:
                 print(
                     json.dumps({"dataset": name, "time": round(source_time, 1), "count": count}),
@@ -217,10 +238,11 @@ def run_dataset(name, camera_name, source_name, config, output_fps):
         "final_count": count,
         "events": all_events,
     }
-    project_path(f"{name}_regression.json").write_text(
+    project_path(f"{output_stem}.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    validate_events(name, all_events)
+    if start_time <= 0 and end_time is None:
+        validate_events(name, all_events)
     print(json.dumps(report, ensure_ascii=False))
     return report
 
@@ -230,6 +252,10 @@ def main():
     parser.add_argument("datasets", nargs="*")
     parser.add_argument("--config", default="config.json")
     parser.add_argument("--fps", type=float, default=15.0)
+    parser.add_argument("--start", type=float, default=0.0, help="source start time in seconds")
+    parser.add_argument("--end", type=float, help="source end time in seconds")
+    parser.add_argument("--output-name", help="output stem, without extension")
+    parser.add_argument("--corridor", help="JSON corridor geometry, used for the selected camera")
     args = parser.parse_args()
     unknown_datasets = sorted(set(args.datasets) - DATASETS.keys())
     if unknown_datasets:
@@ -237,9 +263,30 @@ def main():
 
     config = load_config(args.config)
     reports = []
+    if args.output_name and len(args.datasets) != 1:
+        parser.error("--output-name requires exactly one dataset")
+    if args.corridor and len(args.datasets) != 1:
+        parser.error("--corridor requires exactly one dataset")
+    if args.corridor:
+        camera_name, _ = DATASETS[args.datasets[0]]
+        config.setdefault("crossing", {})["counting_mode"] = "corridor"
+        config["crossing"].setdefault("corridors", {})[camera_name] = json.loads(
+            Path(args.corridor).read_text(encoding="utf-8")
+        )
     for name in args.datasets or DATASETS:
         camera_name, source_name = DATASETS[name]
-        reports.append(run_dataset(name, camera_name, source_name, config, args.fps))
+        reports.append(
+            run_dataset(
+                name,
+                camera_name,
+                source_name,
+                config,
+                args.fps,
+                args.start,
+                args.end,
+                args.output_name,
+            )
+        )
     print(json.dumps({"datasets": len(reports), "events": sum(len(item["events"]) for item in reports)}))
 
 

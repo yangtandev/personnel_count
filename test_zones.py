@@ -1,6 +1,9 @@
 import unittest
 from dataclasses import dataclass
 
+import numpy as np
+
+from detection.appearance import appearance_descriptor
 from counting.lines import LineCounter
 from counting.calibration import suggest_counting_line
 from detection.head_assignment import match_heads_to_people
@@ -13,6 +16,7 @@ class Detection:
     track_id: int = None
     point: tuple = None
     point_source: str = "person"
+    appearance: tuple = None
 
     @property
     def area(self):
@@ -20,8 +24,13 @@ class Detection:
         return max(0, x2 - x1) * max(0, y2 - y1)
 
 
-def detection(center_x, center_y=50, track_id=None):
-    return Detection((center_x - 5, center_y - 10, center_x + 5, center_y + 10), track_id=track_id)
+def detection(center_x, center_y=50, track_id=None, appearance=None, point_source="person"):
+    return Detection(
+        (center_x - 5, center_y - 10, center_x + 5, center_y + 10),
+        track_id=track_id,
+        appearance=appearance,
+        point_source=point_source,
+    )
 
 
 def make_counter(flow_direction_lock=False, line=None, crossing=None, reverse_anchor_sec=0.0):
@@ -41,6 +50,10 @@ def make_counter(flow_direction_lock=False, line=None, crossing=None, reverse_an
         "association_max_distance_ratio": 2.0,
         "unambiguous_association_max_distance_ratio": 2.0,
         "same_id_bonus": 0.2,
+        "appearance_memory_enabled": True,
+        "appearance_weight": 2.0,
+        "appearance_max_distance": 0.2,
+        "appearance_handoff_timeout_sec": 2.0,
     }
     crossing_config.update(crossing or {})
     return LineCounter(
@@ -65,7 +78,280 @@ def make_counter(flow_direction_lock=False, line=None, crossing=None, reverse_an
     )
 
 
+def make_corridor_counter(crossing=None):
+    """A simple left-to-right passage used to specify corridor behaviour."""
+    corridor = {
+        "outside": [(0.0, 0.0), (0.35, 0.0), (0.35, 1.0), (0.0, 1.0)],
+        "transit": [(0.35, 0.0), (0.65, 0.0), (0.65, 1.0), (0.35, 1.0)],
+        "inside": [(0.65, 0.0), (1.0, 0.0), (1.0, 1.0), (0.65, 1.0)],
+        "events": {
+            "outside_to_inside": "enter",
+            "inside_to_outside": "exit",
+        },
+    }
+    return make_counter(
+        crossing={
+            "counting_mode": "corridor",
+            "corridors": {"top": corridor},
+            "zone_confirm_frames": 1,
+            "zone_confirm_sec": 0.0,
+            "initial_baseline_sec": 0.0,
+            **(crossing or {}),
+        }
+    )
+
+
 class LineCounterTest(unittest.TestCase):
+    def test_corridor_counts_only_completed_outside_to_inside_path(self):
+        counter = make_corridor_counter()
+        self.assertEqual(counter.counting_mode, "corridor")
+        count = 0
+        for now, x in ((0.0, 20), (0.1, 50), (0.2, 80)):
+            events, _, _ = counter.update([detection(x, track_id=1)], (100, 100, 3), now, count)
+            if events:
+                count = events[-1].count_after
+
+        self.assertEqual(count, 1)
+
+    def test_corridor_turnback_does_not_count(self):
+        counter = make_corridor_counter()
+        events = []
+        for now, x in ((0.0, 20), (0.1, 50), (0.2, 20)):
+            new_events, _, _ = counter.update(
+                [detection(x, track_id=1)], (100, 100, 3), now, 0
+            )
+            events.extend(new_events)
+
+        self.assertEqual(events, [])
+
+    def test_corridor_rejects_reverse_before_terminal_dwell(self):
+        counter = make_corridor_counter(
+            {
+                "corridor_reverse_min_terminal_sec": 0.5,
+                "association_max_distance_ratio": 10.0,
+                "unambiguous_association_max_distance_ratio": 10.0,
+            }
+        )
+        observed = []
+        for now, x in ((0.0, 20), (0.1, 50), (0.2, 80), (0.3, 50), (0.4, 20)):
+            events, status, _ = counter.update([detection(x, track_id=1)], (100, 100, 3), now, 0)
+            observed.extend(events)
+
+        self.assertEqual([event.event for event in observed], ["enter"])
+        self.assertEqual(status, "corridor_reverse_unsettled")
+
+    def test_corridor_allows_reverse_after_terminal_dwell(self):
+        counter = make_corridor_counter(
+            {
+                "corridor_reverse_min_terminal_sec": 0.5,
+                "association_max_distance_ratio": 10.0,
+                "unambiguous_association_max_distance_ratio": 10.0,
+            }
+        )
+        count = 0
+        observed = []
+        for now, x in ((0.0, 20), (0.1, 50), (0.2, 80), (0.8, 80), (0.9, 50), (1.0, 20)):
+            events, _, _ = counter.update([detection(x, track_id=1)], (100, 100, 3), now, count)
+            observed.extend(events)
+            if events:
+                count = events[-1].count_after
+
+        self.assertEqual([event.event for event in observed], ["enter", "exit"])
+        self.assertEqual(count, 0)
+
+    def test_corridor_tracks_simultaneous_opposite_paths_independently(self):
+        counter = make_corridor_counter()
+        count = 5
+        frames = (
+            (0.0, (20, 1), (80, 2)),
+            (0.1, (50, 1), (50, 2)),
+            (0.2, (80, 1), (20, 2)),
+        )
+        observed = []
+        for now, first, second in frames:
+            events, _, _ = counter.update(
+                [detection(*first, track_id=first[1]), detection(*second, track_id=second[1])],
+                (100, 100, 3), now, count,
+            )
+            observed.extend(event.event for event in events)
+            if events:
+                count = events[-1].count_after
+
+        self.assertEqual(observed, ["enter", "exit"])
+        self.assertEqual(count, 5)
+
+    def test_corridor_keeps_people_separate_when_tracker_reuses_one_raw_id(self):
+        """A duplicate raw ID must not steal the other person's journey."""
+        counter = make_corridor_counter()
+        red = (1.0, 0.0, 0.0)
+        blue = (0.0, 0.0, 1.0)
+        counter.update(
+            [
+                detection(20, track_id=1, appearance=red),
+                detection(80, track_id=2, appearance=blue),
+            ],
+            (100, 100, 3),
+            0.0,
+            5,
+        )
+        # The tracker incorrectly gives both overlapping people raw ID 1.
+        counter.update(
+            [
+                detection(50, track_id=1, appearance=blue),
+                detection(50, track_id=1, appearance=red),
+            ],
+            (100, 100, 3),
+            0.1,
+            5,
+        )
+        events, _, _ = counter.update(
+            [
+                detection(20, track_id=1, appearance=blue),
+                detection(80, track_id=1, appearance=red),
+            ],
+            (100, 100, 3),
+            0.2,
+            5,
+        )
+
+        self.assertEqual([event.event for event in events], ["exit", "enter"])
+        self.assertEqual([event.stable_id for event in events], [2, 1])
+
+    def test_corridor_counts_swept_path_when_detector_misses_transit_frame(self):
+        counter = make_corridor_counter({"association_max_distance_ratio": 10.0})
+        counter.update([detection(20, track_id=1)], (100, 100, 3), 0.0, 0)
+        events, _, _ = counter.update([detection(80, track_id=1)], (100, 100, 3), 0.4, 0)
+
+        self.assertEqual([event.event for event in events], ["enter"])
+
+    def test_corridor_id_handoff_in_transit_keeps_logical_person(self):
+        counter = make_corridor_counter(
+            {
+                "handoff_timeout_sec": 0.25,
+                "appearance_handoff_timeout_sec": 2.0,
+                "association_max_distance_ratio": 0.25,
+                "unambiguous_association_max_distance_ratio": 0.75,
+                "appearance_association_max_distance_ratio": 2.0,
+            }
+        )
+        appearance = (1.0, 0.0, 0.0)
+        counter.update([detection(20, track_id=1, appearance=appearance)], (100, 100, 3), 0.0, 0)
+        counter.update([detection(50, track_id=1, appearance=appearance)], (100, 100, 3), 0.1, 0)
+        events, _, _ = counter.update(
+            [detection(80, track_id=9, appearance=appearance)], (100, 100, 3), 0.6, 0
+        )
+
+        self.assertEqual([event.event for event in events], ["enter"])
+        self.assertEqual(events[0].stable_id, 1)
+
+    def test_corridor_reconnects_a_lost_journey_that_reappears_in_transit(self):
+        counter = make_corridor_counter(
+            {
+                "journey_reacquire_timeout_sec": 2.0,
+                "journey_reacquire_max_distance_ratio": 20.0,
+            }
+        )
+        appearance = (1.0, 0.0, 0.0)
+        count = 0
+        for now, x in ((0.0, 20), (0.1, 50), (0.2, 80)):
+            events, _, _ = counter.update(
+                [detection(x, track_id=1, appearance=appearance)], (100, 100, 3), now, count
+            )
+            if events:
+                count = events[-1].count_after
+
+        counter.update([], (100, 100, 3), 1.5, count)
+        counter.update(
+            [detection(50, track_id=1, appearance=appearance)], (100, 100, 3), 1.6, count
+        )
+        events, _, _ = counter.update(
+            [detection(20, track_id=1, appearance=appearance)], (100, 100, 3), 1.7, count
+        )
+
+        self.assertEqual([event.event for event in events], ["exit"])
+        self.assertEqual(events[0].stable_id, 1)
+
+    def test_corridor_does_not_count_person_first_seen_in_transit(self):
+        counter = make_corridor_counter()
+        counter.update([detection(50, track_id=1)], (100, 100, 3), 0.0, 0)
+        events, _, _ = counter.update([detection(80, track_id=1)], (100, 100, 3), 0.1, 0)
+
+        self.assertEqual(events, [])
+
+    def test_corridor_ignores_initial_person_already_inside(self):
+        counter = make_corridor_counter({"initial_baseline_sec": 1.0})
+        observed = []
+        for now, x in ((0.0, 80), (0.1, 50), (0.2, 20), (0.3, 50), (0.4, 80)):
+            events, _, _ = counter.update([detection(x, track_id=1)], (100, 100, 3), now, 0)
+            observed.extend(events)
+
+        self.assertEqual(observed, [])
+
+    def test_corridor_counts_later_reacquisition_that_starts_in_transit(self):
+        counter = make_corridor_counter(
+            {"initial_baseline_sec": 1.0, "allow_transit_reentry": True}
+        )
+        counter.update([], (100, 100, 3), 0.0, 0)
+        counter.update([detection(50, track_id=7)], (100, 100, 3), 2.0, 0)
+        events, _, _ = counter.update([detection(80, track_id=7)], (100, 100, 3), 2.1, 0)
+
+        self.assertEqual([event.event for event in events], ["enter"])
+
+    def test_corridor_reentry_requires_meaningful_progress_from_transit(self):
+        counter = make_corridor_counter(
+            {
+                "allow_transit_reentry": True,
+                "transit_reentry_min_progress_ratio": 0.2,
+            }
+        )
+        counter.update([], (100, 100, 3), 0.0, 0)
+        counter.update([detection(62, track_id=7)], (100, 100, 3), 2.0, 0)
+        events, _, _ = counter.update([detection(66, track_id=7)], (100, 100, 3), 2.1, 0)
+
+        self.assertEqual(events, [])
+
+    def test_corridor_reentry_counts_after_meaningful_progress_from_transit(self):
+        counter = make_corridor_counter(
+            {
+                "allow_transit_reentry": True,
+                "transit_reentry_min_progress_ratio": 0.2,
+            }
+        )
+        counter.update([], (100, 100, 3), 0.0, 0)
+        counter.update([detection(50, track_id=7)], (100, 100, 3), 2.0, 0)
+        events, _, _ = counter.update([detection(80, track_id=7)], (100, 100, 3), 2.1, 0)
+
+        self.assertEqual([event.event for event in events], ["enter"])
+
+    def test_corridor_defers_event_until_a_handed_off_uid_is_stable(self):
+        counter = make_corridor_counter({"corridor_handoff_confirm_frames": 2})
+        appearance = (1.0, 0.0, 0.0)
+        counter.update([detection(20, track_id=1, appearance=appearance)], (100, 100, 3), 0.0, 0)
+        counter.update([detection(50, track_id=1, appearance=appearance)], (100, 100, 3), 0.1, 0)
+        events, _, _ = counter.update(
+            [detection(80, track_id=9, appearance=appearance)], (100, 100, 3), 0.2, 0
+        )
+        self.assertEqual(events, [])
+
+        events, _, _ = counter.update(
+            [detection(80, track_id=9, appearance=appearance)], (100, 100, 3), 0.3, 0
+        )
+        self.assertEqual([event.event for event in events], ["enter"])
+
+    def test_corridor_ignores_only_the_point_source_switch_frame(self):
+        counter = make_corridor_counter()
+        counter.update([detection(20, track_id=1)], (100, 100, 3), 0.0, 0)
+        counter.update([detection(50, track_id=1)], (100, 100, 3), 0.1, 0)
+        events, _, _ = counter.update(
+            [detection(80, track_id=1, point_source="head")], (100, 100, 3), 0.2, 0
+        )
+        self.assertEqual(events, [])
+
+        events, _, _ = counter.update(
+            [detection(80, track_id=1, point_source="head")], (100, 100, 3), 0.3, 0
+        )
+        self.assertEqual([event.event for event in events], ["enter"])
+
     def test_counts_one_tracked_person_crossing(self):
         counter = make_counter()
         counter.update([detection(35, track_id=1)], (100, 100, 3), 0.0, 0)
@@ -390,6 +676,156 @@ class LineCounterTest(unittest.TestCase):
 
         self.assertEqual(count, 1)
 
+    def test_appearance_keeps_event_owner_when_nearby_people_exchange_raw_ids(self):
+        """A raw-ID switch must not let the nearby person's crossing own the event."""
+        counter = make_counter(
+            crossing={
+                "association_max_distance_ratio": 2.0,
+                "unambiguous_association_max_distance_ratio": 2.0,
+            }
+        )
+        person_a = (1.0, 0.0, 0.0)
+        person_b = (0.0, 1.0, 0.0)
+        counter.update(
+            [
+                detection(46, track_id=1, appearance=person_a),
+                detection(54, track_id=2, appearance=person_b),
+            ],
+            (100, 100, 3),
+            0.0,
+            10,
+        )
+        events, _, _ = counter.update(
+            [
+                detection(54, track_id=31, appearance=person_a),
+                detection(46, track_id=32, appearance=person_b),
+            ],
+            (100, 100, 3),
+            0.1,
+            10,
+        )
+
+        self.assertEqual(
+            [(event.track_id, event.event) for event in events],
+            [(31, "enter"), (32, "exit")],
+        )
+
+    def test_same_appearance_reconnects_after_short_gap_and_preserves_count_history(self):
+        """A replacement raw ID must inherit a recent person's crossing state."""
+        counter = make_counter(
+            reverse_anchor_sec=0.5,
+            crossing={
+                "handoff_timeout_sec": 0.25,
+                "appearance_handoff_timeout_sec": 2.0,
+                "association_max_distance_ratio": 0.25,
+                "unambiguous_association_max_distance_ratio": 0.75,
+                "appearance_association_max_distance_ratio": 2.0,
+            }
+        )
+        person_a = (1.0, 0.0, 0.0)
+        count = 0
+        for now, x in ((0.0, 35), (0.1, 40), (0.2, 45)):
+            counter.update([detection(x, track_id=1, appearance=person_a)], (100, 100, 3), now, count)
+        events, _, _ = counter.update(
+            [detection(65, track_id=9, appearance=person_a)],
+            (100, 100, 3),
+            0.8,
+            count,
+        )
+
+        self.assertEqual([event.event for event in events], ["enter"])
+        self.assertEqual(events[0].stable_id, 1)
+        self.assertEqual(events[0].track_id, 9)
+
+        counter.update(
+            [detection(35, track_id=21, appearance=person_a)],
+            (100, 100, 3),
+            0.9,
+            1,
+        )
+        events, _, _ = counter.update(
+            [detection(65, track_id=21, appearance=person_a)],
+            (100, 100, 3),
+            1.1,
+            1,
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(len(counter.tracks), 1)
+        self.assertEqual(counter.track_visuals()[0]["stable_id"], 1)
+
+    def test_appearance_reconnects_across_a_missing_crossing_frame(self):
+        """A short detector gap at the line must not lose a valid individual crossing."""
+        counter = make_counter(
+            crossing={
+                "handoff_timeout_sec": 0.25,
+                "appearance_handoff_timeout_sec": 2.0,
+                "association_max_distance_ratio": 0.25,
+                "unambiguous_association_max_distance_ratio": 0.75,
+            }
+        )
+        person_a = (0.0, 0.0, 1.0)
+        for now, x in ((0.0, 35), (0.1, 40), (0.2, 45)):
+            counter.update([detection(x, track_id=1, appearance=person_a)], (100, 100, 3), now, 0)
+
+        events, _, _ = counter.update(
+            [detection(65, track_id=8, appearance=person_a)],
+            (100, 100, 3),
+            0.8,
+            0,
+        )
+
+        self.assertEqual([event.event for event in events], ["enter"])
+        self.assertEqual(events[0].stable_id, 1)
+
+    def test_appearance_handoff_can_be_disabled_for_safe_rollback(self):
+        counter = make_counter(
+            crossing={
+                "appearance_memory_enabled": False,
+                "handoff_timeout_sec": 0.25,
+                "appearance_handoff_timeout_sec": 2.0,
+                "association_max_distance_ratio": 0.25,
+                "unambiguous_association_max_distance_ratio": 0.75,
+            }
+        )
+        person_a = (0.0, 0.0, 1.0)
+        for now, x in ((0.0, 35), (0.1, 40), (0.2, 45)):
+            counter.update([detection(x, track_id=1, appearance=person_a)], (100, 100, 3), now, 0)
+
+        events, _, _ = counter.update(
+            [detection(65, track_id=8, appearance=person_a)],
+            (100, 100, 3),
+            0.8,
+            0,
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(len(counter.tracks), 2)
+
+    def test_nearby_same_raw_id_survives_an_appearance_change(self):
+        """A tight same-ID track remains continuous when its crop changes at overlap."""
+        counter = make_counter(
+            crossing={
+                "association_max_distance_ratio": 0.5,
+                "unambiguous_association_max_distance_ratio": 0.75,
+            }
+        )
+        counter.update(
+            [detection(35, track_id=1, appearance=(1.0, 0.0, 0.0))],
+            (100, 100, 3),
+            0.0,
+            0,
+        )
+        counter.update(
+            [detection(40, track_id=1, appearance=(0.0, 1.0, 0.0))],
+            (100, 100, 3),
+            0.1,
+            0,
+        )
+
+        self.assertEqual(len(counter.tracks), 1)
+        self.assertEqual(counter.track_visuals()[0]["stable_id"], 1)
+
 
 class HeadAssignmentTest(unittest.TestCase):
     def test_one_head_is_never_shared_by_overlapping_people(self):
@@ -409,6 +845,21 @@ class HeadAssignmentTest(unittest.TestCase):
 
         self.assertIs(matches[0], left)
         self.assertIs(matches[1], right)
+
+
+class AppearanceDescriptorTest(unittest.TestCase):
+    def test_body_colour_descriptor_is_stable_and_distinguishes_colours(self):
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        frame[20:80, 10:40] = (220, 30, 30)
+        frame[20:80, 60:90] = (30, 30, 220)
+
+        blue = appearance_descriptor(frame, (10, 20, 40, 80))
+        blue_again = appearance_descriptor(frame, (10, 20, 40, 80))
+        red = appearance_descriptor(frame, (60, 20, 90, 80))
+
+        self.assertIsNotNone(blue)
+        self.assertGreater(sum(left * right for left, right in zip(blue, blue_again)), 0.99)
+        self.assertLess(sum(left * right for left, right in zip(blue, red)), 0.2)
 
 
 class CalibrationTest(unittest.TestCase):

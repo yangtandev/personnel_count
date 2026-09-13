@@ -107,7 +107,7 @@ class CameraWorker(threading.Thread):
             self.shared.frames[self.name] = frame
 
     def _annotate(self, frame, people):
-        self._draw_counting_line(frame)
+        self._draw_counting_geometry(frame)
         for track in self.counter.track_visuals():
             trail = np.array([[int(x), int(y)] for x, y in track["trail"]], dtype=np.int32)
             if len(trail) >= 2:
@@ -140,11 +140,28 @@ class CameraWorker(threading.Thread):
             cv2.putText(frame, "track-point", (int(point_x) + 8, int(point_y) - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 255), 2)
         return frame
 
-    def _draw_counting_line(self, frame):
+    def _draw_counting_geometry(self, frame):
         h, w = frame.shape[:2]
-        line = self.counter.counting_line(w, h)
-        if line is None:
+        mode, geometry = self.counter.counting_geometry(w, h)
+        if geometry is None:
             return
+        if mode == "corridor":
+            colors = {
+                "outside": (255, 120, 0),
+                "transit": (0, 220, 255),
+                "inside": (0, 200, 0),
+            }
+            labels = {"outside": "OUTSIDE", "transit": "PASSAGE", "inside": "INSIDE"}
+            for name, polygon in geometry.items():
+                points = np.array([[int(x), int(y)] for x, y in polygon], dtype=np.int32)
+                overlay = frame.copy()
+                cv2.fillPoly(overlay, [points], colors[name])
+                cv2.addWeighted(overlay, 0.12, frame, 0.88, 0, frame)
+                cv2.polylines(frame, [points], True, colors[name], 3)
+                x, y = points[0]
+                cv2.putText(frame, labels[name], (int(x), max(30, int(y) - 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[name], 2)
+            return
+        line = geometry
         start, end = line
         start = (int(start[0]), int(start[1]))
         end = (int(end[0]), int(end[1]))
