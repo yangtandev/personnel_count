@@ -46,6 +46,7 @@ class _Track:
     corridor_pending_transition: tuple = None
     corridor_terminal_since: float = 0.0
     corridor_transit_start: tuple = None
+    corridor_state_point: tuple = None
     velocity: tuple = (0.0, 0.0)
     appearance: tuple = None
     samples: list = field(default_factory=list)
@@ -162,6 +163,10 @@ class LineCounter:
         self.unambiguous_association_max_distance_ratio = max(
             self.association_max_distance_ratio,
             float(crossing_cfg.get("unambiguous_association_max_distance_ratio", 0.75)),
+        )
+        self.point_source_switch_max_distance_ratio = max(
+            self.unambiguous_association_max_distance_ratio,
+            float(crossing_cfg.get("point_source_switch_max_distance_ratio", 4.0)),
         )
         self.journey_reacquire_max_distance_ratio = max(
             self.association_max_distance_ratio,
@@ -364,6 +369,7 @@ class LineCounter:
                     "person": person,
                     "external_id": person.track_id,
                     "point": point,
+                    "point_source": getattr(person, "point_source", "person"),
                     "height": max(1.0, float(y2 - y1)),
                     "appearance": (
                         self._appearance(getattr(person, "appearance", None))
@@ -425,10 +431,22 @@ class LineCounter:
                     and observation["external_id"] == track.external_id
                 )
                 raw_id_is_unique = raw_id_counts.get(observation["external_id"], 0) == 1
+                point_source_changed = observation["point_source"] != track.point_source
+                source_switch_match = (
+                    same_id
+                    and raw_id_is_unique
+                    and not dormant
+                    and point_source_changed
+                    and elapsed <= self.handoff_timeout_sec
+                    and normalized <= self.point_source_switch_max_distance_ratio
+                )
                 trusted_same_id = (
                     same_id
                     and raw_id_is_unique
-                    and normalized <= self.association_max_distance_ratio
+                    and (
+                        normalized <= self.association_max_distance_ratio
+                        or source_switch_match
+                    )
                 )
                 appearance_distance = self._appearance_distance(
                     observation["appearance"], track.appearance
@@ -452,7 +470,7 @@ class LineCounter:
                 regular_match = (
                     elapsed <= self.handoff_timeout_sec
                     and normalized <= self.unambiguous_association_max_distance_ratio
-                )
+                ) or source_switch_match
                 appearance_handoff = (
                     appearance_match
                     and elapsed <= self.appearance_handoff_timeout_sec
@@ -475,6 +493,7 @@ class LineCounter:
                     extended_pairs.append(pair)
                 if (
                     normalized <= self.association_max_distance_ratio
+                    or source_switch_match
                     or appearance_handoff
                     or journey_reacquire
                 ):
@@ -568,6 +587,7 @@ class LineCounter:
         if created:
             zone = self._corridor_zone(raw_point, corridor)
             track.corridor_zone = zone
+            track.corridor_state_point = raw_point
             track.corridor_baseline = (
                 self.initial_baseline_sec > 0
                 and zone == "inside"
@@ -631,7 +651,9 @@ class LineCounter:
         if not self._record_corridor_candidate(track, zone, now):
             return None, "corridor_pending"
         previous_zone = track.corridor_zone
+        previous_state_point = track.corridor_state_point or previous_raw_point
         if zone == previous_zone:
+            track.corridor_state_point = raw_point
             pending = track.corridor_pending_transition
             if (
                 pending is not None
@@ -652,8 +674,11 @@ class LineCounter:
             previous_zone in {"outside", "inside"}
             and zone in {"outside", "inside"}
             and previous_zone != zone
-            and self._segment_touches_polygon(previous_raw_point, raw_point, corridor["transit"])
+            and self._segment_touches_polygon(
+                previous_state_point, raw_point, corridor["transit"]
+            )
         )
+        track.corridor_state_point = raw_point
         if direct_terminal_change:
             return self._complete_or_defer_corridor_path(
                 track, person, previous_zone, zone, now, count

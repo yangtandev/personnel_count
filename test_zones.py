@@ -352,6 +352,21 @@ class LineCounterTest(unittest.TestCase):
         )
         self.assertEqual([event.event for event in events], ["enter"])
 
+    def test_corridor_keeps_swept_path_across_point_source_switch(self):
+        counter = make_corridor_counter()
+        counter.update([detection(80, track_id=1)], (100, 100, 3), 0.0, 1)
+
+        events, _, _ = counter.update(
+            [detection(20, track_id=1, point_source="head")], (100, 100, 3), 0.1, 1
+        )
+        self.assertEqual(events, [])
+
+        events, _, _ = counter.update(
+            [detection(20, track_id=1, point_source="head")], (100, 100, 3), 0.2, 1
+        )
+        self.assertEqual([event.event for event in events], ["exit"])
+        self.assertEqual(events[0].count_after, 0)
+
     def test_counts_one_tracked_person_crossing(self):
         counter = make_counter()
         counter.update([detection(35, track_id=1)], (100, 100, 3), 0.0, 0)

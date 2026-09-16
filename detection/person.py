@@ -8,11 +8,6 @@ try:
 except ImportError:
     from ultralytics import YOLO as YOLOv10
 
-try:
-    import mediapipe as mp
-except ImportError:
-    mp = None
-
 from config.loader import project_path
 from detection.appearance import appearance_descriptor
 from detection.head_assignment import match_heads_to_people
@@ -63,7 +58,13 @@ class PersonDetector:
         self.tracking_failed = False
         self.face_detector = None
         self.face_mesh = None
-        if mp is not None and self.use_face_detection:
+        mp = None
+        if self.use_face_detection:
+            try:
+                import mediapipe as mp
+            except ImportError:
+                pass
+        if mp is not None:
             self.face_detector = mp.solutions.face_detection.FaceDetection(
                 model_selection=1,
                 min_detection_confidence=float(model_cfg.get("face_min_conf", 0.35)),

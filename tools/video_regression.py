@@ -13,7 +13,6 @@ sys.path.insert(0, str(ROOT))
 
 from config.loader import load_config, project_path
 from counting.lines import LineCounter
-from detection.person import PersonDetector
 
 
 DATASETS = {
@@ -101,6 +100,8 @@ def annotate(frame, counter, detections):
 
 
 def run_dataset(name, camera_name, source_name, config, output_fps, start_time=0.0, end_time=None, output_name=None):
+    from detection.person import PersonDetector
+
     source = project_path(source_name)
     if not source.exists():
         raise FileNotFoundError(source)
