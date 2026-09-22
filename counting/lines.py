@@ -28,6 +28,8 @@ class _Track:
     point_source: str
     created_at: float
     last_seen_at: float
+    display_origin: tuple = None
+    display_confirmed: bool = False
     seen_frames: int = 1
     cooldown_until: float = 0.0
     counted: bool = False
@@ -208,6 +210,9 @@ class LineCounter:
             0.0, float(counter_cfg.get("reverse_anchor_sec", 0.0))
         )
         self.use_detection_point = bool(crossing_cfg.get("use_detection_point", True))
+        self.display_min_motion_box_ratio = max(
+            0.0, float(crossing_cfg.get("display_min_motion_box_ratio", 0.03))
+        )
         ratio_cfg = crossing_cfg.get("point_y_ratio", 0.15)
         if isinstance(ratio_cfg, dict):
             ratio_cfg = ratio_cfg.get(camera_name, ratio_cfg.get("default", 0.15))
@@ -304,7 +309,12 @@ class LineCounter:
             self.status = "corridor_not_configured"
             return [], self.status, people
         if not people:
-            self.status = "tracking" if self.tracks else "waiting"
+            has_visible_track = any(track.display_confirmed for track in self.tracks.values())
+            self.status = (
+                "tracking"
+                if self.tracks and (self.display_min_motion_box_ratio <= 0 or has_visible_track)
+                else "waiting"
+            )
             return [], self.status, people
 
         tracked_people = [person for person in people if getattr(person, "track_id", None) is not None]
@@ -312,6 +322,7 @@ class LineCounter:
         events = []
         count = current_count
         statuses = []
+        visible_people = [] if self.display_min_motion_box_ratio > 0 else people
         for person, track, created, handed_off in assignments:
             if self.counting_mode == "corridor":
                 event, status = self._update_corridor_track(
@@ -322,6 +333,14 @@ class LineCounter:
                     track, person, line, width, height, now, count, created, handed_off
                 )
             statuses.append(status)
+            if not track.display_confirmed:
+                origin = track.display_origin or track.point
+                required = max(3.0, track.box_height * self.display_min_motion_box_ratio)
+                track.display_confirmed = hypot(
+                    track.point[0] - origin[0], track.point[1] - origin[1]
+                ) >= required
+            if track.display_confirmed and self.display_min_motion_box_ratio > 0:
+                visible_people.append(person)
             if event is not None:
                 events.append(event)
                 count = event.count_after
@@ -330,13 +349,19 @@ class LineCounter:
             self.status = f"counted_{events[-1].event}"
         elif len(tracked_people) != len(people):
             self.status = "tracking_unavailable"
+        elif self.display_min_motion_box_ratio > 0 and not any(
+            track.display_confirmed for track in self.tracks.values()
+        ):
+            self.status = "waiting"
         elif statuses:
             self.status = statuses[-1]
-        return events, self.status, people
+        return events, self.status, visible_people
 
     def track_visuals(self):
         visuals = []
         for track in self.tracks.values():
+            if self.display_min_motion_box_ratio > 0 and not track.display_confirmed:
+                continue
             if self.counting_mode == "corridor":
                 side = track.corridor_zone
                 state = (
@@ -548,6 +573,8 @@ class LineCounter:
                     appearance=observation["appearance"],
                     created_at=now,
                     last_seen_at=now,
+                    display_origin=observation["point"],
+                    display_confirmed=self.display_min_motion_box_ratio <= 0,
                     samples=[observation["point"]],
                     trail=[observation["point"]],
                 )
@@ -640,9 +667,12 @@ class LineCounter:
 
         # A head point may disappear briefly and fall back to the person-box
         # point (or the reverse).  That is not an identity handoff.  Ignore the
-        # switch frame for zone state so it cannot erase an armed passage; if
-        # the new source persists, its next sample participates normally.
+        # switch frame for zone state so it cannot erase an armed passage. Its
+        # coordinates must still become the next sweep origin: head and body
+        # points have different geometry, so inferring motion between them can
+        # create a false reverse crossing.
         if not same_point_source and not handed_off:
+            track.corridor_state_point = raw_point
             return None, "corridor_point_source_changed"
 
         zone = self._corridor_zone(raw_point, corridor)

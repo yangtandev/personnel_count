@@ -102,6 +102,33 @@ def make_corridor_counter(crossing=None):
 
 
 class LineCounterTest(unittest.TestCase):
+    def test_display_waits_for_real_movement_then_stays_visible(self):
+        counter = make_counter(crossing={"display_min_motion_box_ratio": 0.5})
+
+        _, status, people = counter.update([detection(20, track_id=1)], (100, 100, 3), 0.0, 0)
+        self.assertEqual(status, "waiting")
+        self.assertEqual(people, [])
+        _, status, people = counter.update([], (100, 100, 3), 0.05, 0)
+        self.assertEqual(status, "waiting")
+        self.assertEqual(people, [])
+        _, _, people = counter.update([detection(25, track_id=1)], (100, 100, 3), 0.1, 0)
+        self.assertEqual(people, [])
+        _, _, people = counter.update([detection(35, track_id=1)], (100, 100, 3), 0.2, 0)
+        self.assertEqual(len(people), 1)
+        _, _, people = counter.update([detection(35, track_id=1)], (100, 100, 3), 0.3, 0)
+        self.assertEqual(len(people), 1)
+
+    def test_display_confirmation_does_not_block_corridor_counting(self):
+        counter = make_corridor_counter({"display_min_motion_box_ratio": 100.0})
+        counter.update([detection(20, track_id=1)], (100, 100, 3), 0.0, 0)
+        counter.update([detection(50, track_id=1)], (100, 100, 3), 0.1, 0)
+        events, _, people = counter.update(
+            [detection(80, track_id=1)], (100, 100, 3), 0.2, 0
+        )
+
+        self.assertEqual([event.event for event in events], ["enter"])
+        self.assertEqual(people, [])
+
     def test_corridor_counts_only_completed_outside_to_inside_path(self):
         counter = make_corridor_counter()
         self.assertEqual(counter.counting_mode, "corridor")
@@ -352,7 +379,7 @@ class LineCounterTest(unittest.TestCase):
         )
         self.assertEqual([event.event for event in events], ["enter"])
 
-    def test_corridor_keeps_swept_path_across_point_source_switch(self):
+    def test_corridor_does_not_infer_swept_path_across_point_source_switch(self):
         counter = make_corridor_counter()
         counter.update([detection(80, track_id=1)], (100, 100, 3), 0.0, 1)
 
@@ -364,8 +391,7 @@ class LineCounterTest(unittest.TestCase):
         events, _, _ = counter.update(
             [detection(20, track_id=1, point_source="head")], (100, 100, 3), 0.2, 1
         )
-        self.assertEqual([event.event for event in events], ["exit"])
-        self.assertEqual(events[0].count_after, 0)
+        self.assertEqual(events, [])
 
     def test_counts_one_tracked_person_crossing(self):
         counter = make_counter()

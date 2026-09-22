@@ -83,6 +83,8 @@ systemctl --user restart personnel_count.service
 - 不鎖定整體人流方向，可同時計算相反方向的不同人員
 - 沒有追蹤 ID 時停止計數；不同 ID 間只在短時間、短距離且一對一時交接
 - 人員停留數不允許低於 0
+- 所有鏡頭的人形框先依人體框高度確認實際位移，再顯示與標註；`crossing.display_min_motion_box_ratio` 預設 `0.03`，設為 `0` 可停用
+- 活躍追蹤逾一秒即失效，避免不同人員共用舊旅程；走廊旅程仍可依 `journey_reacquire_timeout_sec` 接回
 
 ## 影片回歸測試
 

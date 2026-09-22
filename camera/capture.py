@@ -384,7 +384,7 @@ class VideoCapture:
                 'ffprobe', '-v', 'error', '-select_streams', 'v:0',
                 '-show_entries', 'stream=codec_name,width,height', '-of', 'json',
             ] + input_options + [self.rtsp_url]
-            timeout = self.config.get("ffprobe_timeout") or 5  # [2026-04-24] Default 5s to prevent hang
+            timeout = self.config.get("ffprobe_timeout") or 15
             result = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
             if result.returncode != 0:
                 raise subprocess.CalledProcessError(
@@ -452,7 +452,9 @@ class VideoCapture:
         # These are input options.  Keep them before -i: FFmpeg applies an
         # option to the next input/output file, not globally.
         command.extend([
-            '-fflags', '+nobuffer+discardcorrupt',
+            # ``nobuffer`` prevents some HEVC cameras from delivering the
+            # VPS/PPS needed to decode the first keyframe.
+            '-fflags', '+discardcorrupt',
             '-avioflags', 'direct',
             '-max_delay', '0',
         ])
